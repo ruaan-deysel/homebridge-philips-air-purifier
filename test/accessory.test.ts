@@ -5,7 +5,7 @@ import type { API, Logging, PlatformAccessory } from 'homebridge'
 import { describe, expect, it, vi } from 'vitest'
 import { PhilipsAirAccessory, type PhilipsAirPlatformLike } from '../src/accessory.js'
 import type { DeviceCoordinator } from '../src/device/coordinator.js'
-import { Gen3Key } from '../src/device/keys.js'
+import { Gen1Key, Gen3Key } from '../src/device/keys.js'
 import { resolveModel, type DeviceModelConfig } from '../src/device/models.js'
 import type { DeviceConfig, DeviceStatus } from '../src/airctrl/schema.js'
 
@@ -144,6 +144,13 @@ describe('PhilipsAirAccessory', () => {
     const { accessory, coordinator } = setup()
     const purifier = accessory.getService(Service.AirPurifier)!
 
+    await expect(purifier.getCharacteristic(Characteristic.LockPhysicalControls).handleGetRequest())
+      .resolves.toBe(Characteristic.LockPhysicalControls.CONTROL_LOCK_DISABLED)
+    await purifier.getCharacteristic(Characteristic.LockPhysicalControls).handleSetRequest(
+      Characteristic.LockPhysicalControls.CONTROL_LOCK_ENABLED,
+    )
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen3Key.CHILD_LOCK]: 1 })
+
     await purifier.getCharacteristic(Characteristic.RotationSpeed).handleSetRequest(0)
     expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen3Key.POWER]: 0 })
 
@@ -176,8 +183,10 @@ describe('PhilipsAirAccessory', () => {
       .getCharacteristic(Characteristic.On).handleSetRequest(true)
     expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen3Key.LAMP_MODE]: 1 })
 
-    await accessory.getServiceById(Service.Switch, 'beep')!
-      .getCharacteristic(Characteristic.On).handleSetRequest(true)
+    const beep = accessory.getServiceById(Service.Switch, 'beep')!
+      .getCharacteristic(Characteristic.On)
+    await expect(beep.handleGetRequest()).resolves.toBe(true)
+    await beep.handleSetRequest(true)
     expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen3Key.BEEP]: 100 })
 
     await accessory.getServiceById(Service.Switch, 'sleep')!
@@ -295,6 +304,34 @@ describe('PhilipsAirAccessory', () => {
     coordinator.publish({ mode: 'M', om: '2' })
     await expect(purifier.getCharacteristic(Characteristic.RotationSpeed).handleGetRequest())
       .resolves.toBe(75)
+  })
+
+  it('maps Gen1 child lock booleans and beep strings from model capabilities', async () => {
+    const { accessory, coordinator } = setup(deviceConfig, {
+      [Gen1Key.POWER]: '1',
+      [Gen1Key.MODE]: 'P',
+      [Gen1Key.SPEED]: '1',
+      [Gen1Key.PM25]: 8,
+      [Gen1Key.CHILD_LOCK]: true,
+      [Gen1Key.BEEP]: '1',
+    }, resolveModel('AC2729'))
+    const childLock = accessory.getService(Service.AirPurifier)!
+      .getCharacteristic(Characteristic.LockPhysicalControls)
+
+    await expect(childLock.handleGetRequest())
+      .resolves.toBe(Characteristic.LockPhysicalControls.CONTROL_LOCK_ENABLED)
+    await childLock.handleSetRequest(Characteristic.LockPhysicalControls.CONTROL_LOCK_DISABLED)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen1Key.CHILD_LOCK]: false })
+    await childLock.handleSetRequest(Characteristic.LockPhysicalControls.CONTROL_LOCK_ENABLED)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen1Key.CHILD_LOCK]: true })
+
+    const beep = accessory.getServiceById(Service.Switch, 'beep')!
+      .getCharacteristic(Characteristic.On)
+    await expect(beep.handleGetRequest()).resolves.toBe(true)
+    await beep.handleSetRequest(false)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen1Key.BEEP]: '0' })
+    await beep.handleSetRequest(true)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen1Key.BEEP]: '1' })
   })
 
   it('maps Gen2 power, Auto target, and ordered ladder state', async () => {

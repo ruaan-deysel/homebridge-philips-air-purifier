@@ -112,11 +112,11 @@ export class PhilipsAirAccessory {
     const childLockKey = this.childLockKey
     if (status && childLockKey && childLockKey in status) {
       this.childLock = this.purifier.getCharacteristic(C.LockPhysicalControls)
-      this.onGet(this.childLock, device => booleanFromValue(device[childLockKey])
+      this.onGet(this.childLock, device => this.childLockFromValue(device[childLockKey])
         ? C.LockPhysicalControls.CONTROL_LOCK_ENABLED
         : C.LockPhysicalControls.CONTROL_LOCK_DISABLED)
       this.childLock.onSet(value => this.write({
-        [childLockKey]: booleanValue(value === C.LockPhysicalControls.CONTROL_LOCK_ENABLED),
+        [childLockKey]: this.childLockValue(value === C.LockPhysicalControls.CONTROL_LOCK_ENABLED),
       }))
     } else if (this.purifier.testCharacteristic(C.LockPhysicalControls)) {
       this.purifier.removeCharacteristic(this.purifier.getCharacteristic(C.LockPhysicalControls))
@@ -221,12 +221,13 @@ export class PhilipsAirAccessory {
     }
 
     const cachedBeep = accessory.getServiceById(S.Switch, 'beep')
-    if (config.exposeBeepSwitch && model.switches.includes(Gen3Key.BEEP)) {
+    const beepKey = this.beepKey
+    if (config.exposeBeepSwitch && status && beepKey && beepKey in status) {
       this.beep = cachedBeep ?? accessory.addService(S.Switch, 'Beep', 'beep')
       this.purifier.addLinkedService(this.beep)
       const on = this.beep.getCharacteristic(C.On)
-      this.onGet(on, device => beepFromValue(device[Gen3Key.BEEP]))
-      on.onSet(value => this.write({ [Gen3Key.BEEP]: beepValue(Boolean(value)) }))
+      this.onGet(on, device => this.beepFromValue(device[beepKey]))
+      on.onSet(value => this.write({ [beepKey]: this.beepValue(Boolean(value)) }))
     } else if (cachedBeep) {
       accessory.removeService(cachedBeep)
     }
@@ -253,6 +254,29 @@ export class PhilipsAirAccessory {
       ? Gen3Key.CHILD_LOCK
       : this.model.apiGeneration === ApiGeneration.Gen1 ? Gen1Key.CHILD_LOCK : undefined
     return key && this.model.switches.some(value => deviceKey(value) === key) ? key : undefined
+  }
+
+  private childLockFromValue(value: unknown): boolean {
+    return this.model.apiGeneration === ApiGeneration.Gen1 ? value === true : booleanFromValue(value)
+  }
+
+  private childLockValue(value: boolean): boolean | number {
+    return this.model.apiGeneration === ApiGeneration.Gen1 ? value : booleanValue(value)
+  }
+
+  private get beepKey(): string | undefined {
+    const key = this.model.apiGeneration === ApiGeneration.Gen1
+      ? Gen1Key.BEEP
+      : this.model.apiGeneration === ApiGeneration.Gen3 ? Gen3Key.BEEP : undefined
+    return key && this.model.switches.some(value => deviceKey(value) === key) ? key : undefined
+  }
+
+  private beepFromValue(value: unknown): boolean {
+    return this.model.apiGeneration === ApiGeneration.Gen1 ? value === '1' : beepFromValue(value)
+  }
+
+  private beepValue(value: boolean): string | number {
+    return this.model.apiGeneration === ApiGeneration.Gen1 ? value ? '1' : '0' : beepValue(value)
   }
 
   private get pm25Key(): string {
@@ -440,7 +464,7 @@ export class PhilipsAirAccessory {
     )
     if (this.childLock && this.childLockKey) this.update(
       this.childLock,
-      booleanFromValue(status[this.childLockKey])
+      this.childLockFromValue(status[this.childLockKey])
         ? C.LockPhysicalControls.CONTROL_LOCK_ENABLED
         : C.LockPhysicalControls.CONTROL_LOCK_DISABLED,
     )
@@ -482,9 +506,9 @@ export class PhilipsAirAccessory {
       this.autoPlus.getCharacteristic(C.On),
       booleanFromValue(status[Gen3Key.AUTO_PLUS_AI]),
     )
-    if (this.beep) this.update(
+    if (this.beep && this.beepKey) this.update(
       this.beep.getCharacteristic(C.On),
-      beepFromValue(status[Gen3Key.BEEP]),
+      this.beepFromValue(status[this.beepKey]),
     )
   }
 
