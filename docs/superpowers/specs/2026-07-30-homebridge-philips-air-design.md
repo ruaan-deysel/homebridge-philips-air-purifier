@@ -213,7 +213,7 @@ AirPurifier "Office 1"                    primary
   TargetAirPurifierState     AUTO → D0310C=0 · MANUAL → last manual speed
   RotationSpeed              minStep 20 → 20/40/60/80/100 = D0310C 1…5
   LockPhysicalControls       D03103
-AirQualitySensor             D03120 → AirQuality 1-5 · D03221 → PM2_5Density
+AirQualitySensor             D03221 → PM2_5Density and derived AirQuality
 FilterMaintenance (pre)      D0520D / D05207  → FilterLifeLevel
 FilterMaintenance (HEPA)     D0540E / D05408  → FilterLifeLevel
 TemperatureSensor            D03224 ÷ 10
@@ -222,9 +222,40 @@ Lightbulb                    D03105  display backlight
 Switch (opt-in, default off) Sleep D0310C=17 · Medium 19 · Turbo 18
 ```
 
-`AirQuality` is a 1-5 HomeKit enum (Excellent → Poor); the Philips allergen index
-is bucketed onto it. Switches are off by default so the default Home app tile
-stays uncluttered.
+Switches are off by default so the default Home app tile stays uncluttered.
+
+### Two mappings that are this plugin's decision, not inherited
+
+**`AirQuality`** is a 1-5 HomeKit enum. The HA integration reports the Philips
+allergen index (`D03120`) raw and never buckets it, so there is no mapping to
+inherit. Rather than invent a scale for a vendor-specific index, `AirQuality` is
+derived from **PM2.5** (`D03221`), which has standard breakpoints in µg/m³:
+
+| `AirQuality` | PM2.5 |
+|---|---|
+| 1 `EXCELLENT` | 0 – 12 |
+| 2 `GOOD` | 13 – 35 |
+| 3 `FAIR` | 36 – 55 |
+| 4 `INFERIOR` | 56 – 150 |
+| 5 `POOR` | > 150 |
+
+The allergen index has no HomeKit characteristic and is not exposed in v1. If it
+is wanted later, a custom characteristic would surface it in Eve but not in the
+Home app.
+
+**`RotationSpeed` and `TargetAirPurifierState`** interact, so both edges are
+pinned down explicitly:
+
+- `RotationSpeed = 0` is not a device speed. It means off, and is handled by
+  `Active`, so the plugin does not write `D0310C = 0` (which is Auto).
+- Setting `RotationSpeed` while in Auto implies a mode change and also sets
+  `TargetAirPurifierState` to `MANUAL`.
+- `TargetAirPurifierState = MANUAL` restores the last manual speed observed for
+  this device. When none has been seen yet — first run, or the device has only
+  ever been in Auto — it defaults to speed 1 (`D0310C = 1`), the lowest real
+  speed, rather than guessing higher.
+- The last manual speed is held in memory only. It is not persisted, so a
+  Homebridge restart resets it to the speed-1 default.
 
 Verified live state from the test device, for reference:
 
