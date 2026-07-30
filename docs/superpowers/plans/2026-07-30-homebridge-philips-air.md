@@ -55,7 +55,7 @@
 **Goal:** A buildable, testable, lintable Homebridge 2 plugin skeleton that registers an empty platform.
 
 **Files:**
-- Create: `package.json`, `tsconfig.json`, `eslint.config.js`, `vitest.config.ts`, `.npmignore`
+- Create: `package.json`, `tsconfig.json`, `eslint.config.js`, `vitest.config.ts`
 - Create: `src/settings.ts`, `src/index.ts`
 - Create: `test/scaffold.test.ts`
 
