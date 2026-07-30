@@ -21,7 +21,6 @@ export const CoapCode = {
 export const CoapOption = {
   Observe: 6,
   UriPath: 11,
-  ContentFormat: 12,
   MaxAge: 14,
 } as const
 
@@ -126,6 +125,12 @@ export function decode(buffer: Buffer): DecodedCoapMessage {
   const token = buffer.subarray(offset, offset + tokenLength)
   offset += tokenLength
 
+  // A truncated datagram can push `offset` past `buffer.length`: reads then
+  // return `undefined`, which propagates as NaN through length/delta math and
+  // yields a bogus-but-non-throwing option (or an empty subarray). Left
+  // unguarded deliberately: UDP delivery is all-or-nothing so this can only
+  // happen to a genuinely malformed packet, and a NaN/garbage token cannot
+  // match any pending handler's hex key, so the message is inert either way.
   const options: CoapOptionEntry[] = []
   let number = 0
   while (offset < buffer.length && buffer[offset] !== PAYLOAD_MARKER) {
@@ -162,9 +167,4 @@ export function uriPathOptions(path: string): CoapOptionEntry[] {
     number: CoapOption.UriPath,
     value: Buffer.from(segment, 'utf8'),
   }))
-}
-
-/** Human-readable code, e.g. 69 -> "2.05". Used in log messages only. */
-export function codeToString(code: number): string {
-  return `${code >> 5}.${String(code & 0x1F).padStart(2, '0')}`
 }

@@ -17,8 +17,6 @@ export interface RequestOptions {
   method: 'GET' | 'POST'
   path: string
   payload?: string | Buffer
-  /** Send the Observe option. Status reads need this even when one-shot. */
-  observe?: boolean
   timeoutMs?: number
 }
 
@@ -45,6 +43,10 @@ export interface Observation {
 export class CoapSocket {
   private readonly socket: Socket
   private readonly handlers = new Map<string, (message: DecodedCoapMessage) => void>()
+  /** Timeout + reject for each in-flight request/observe-subscribe, so close() can cancel them cleanly. */
+  private readonly pending = new Map<string, { timer: ReturnType<typeof setTimeout>, reject: (error: Error) => void }>()
+  /** onError callbacks for observations past their first response, notified on a socket-level error. */
+  private readonly observers = new Map<string, (error: Error) => void>()
   private messageId: number
   private closed = false
 
@@ -55,9 +57,12 @@ export class CoapSocket {
     this.messageId = randomInt(0, 0x10000)
     this.socket = createSocket('udp4')
     this.socket.on('message', buffer => this.dispatch(buffer))
-    // A socket-level error must not become an unhandled exception; pending
-    // requests fail via their own timeouts.
-    this.socket.on('error', () => {})
+    // A socket-level error must not become an unhandled exception. In-flight
+    // requests still fail via their own timeouts; live observations get this
+    // error pushed to onError so a dead network doesn't look like a quiet device.
+    this.socket.on('error', error => {
+      for (const onError of this.observers.values()) onError(error)
+    })
     this.socket.unref()
   }
 
@@ -105,27 +110,31 @@ export class CoapSocket {
 
   /** One request, one response. */
   request(options: RequestOptions): Promise<DecodedCoapMessage> {
-    const { method, path, payload, observe = false, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+    const { method, path, payload, timeoutMs = DEFAULT_TIMEOUT_MS } = options
     return new Promise((resolve, reject) => {
       const token = randomBytes(4)
       const key = token.toString('hex')
 
       const timer = setTimeout(() => {
         this.handlers.delete(key)
+        this.pending.delete(key)
         reject(new Error(`CoAP timeout after ${timeoutMs}ms for ${method} ${path}`))
       }, timeoutMs)
+      this.pending.set(key, { timer, reject })
 
       this.handlers.set(key, message => {
         clearTimeout(timer)
         this.handlers.delete(key)
+        this.pending.delete(key)
         resolve(message)
       })
 
       try {
-        this.transmit(method, path, token, observe ? 0 : undefined, payload)
+        this.transmit(method, path, token, undefined, payload)
       } catch (error) {
         clearTimeout(timer)
         this.handlers.delete(key)
+        this.pending.delete(key)
         reject(error as Error)
       }
     })
@@ -133,21 +142,26 @@ export class CoapSocket {
 
   /** Register an observation. `onNotify` fires for every push after the first. */
   async observe(options: ObserveOptions): Promise<Observation> {
-    const { path, onNotify, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+    const { path, onNotify, onError, timeoutMs = DEFAULT_TIMEOUT_MS } = options
     const token = randomBytes(4)
     const key = token.toString('hex')
 
     const first = await new Promise<DecodedCoapMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.handlers.delete(key)
+        this.pending.delete(key)
         reject(new Error(`CoAP observe timeout after ${timeoutMs}ms for ${path}`))
       }, timeoutMs)
+      this.pending.set(key, { timer, reject })
 
       let settled = false
       this.handlers.set(key, message => {
         if (!settled) {
           settled = true
           clearTimeout(timer)
+          this.pending.delete(key)
+          // Only becomes "live" (eligible for onError) once subscribed.
+          if (onError) this.observers.set(key, onError)
           resolve(message)
           return
         }
@@ -159,6 +173,7 @@ export class CoapSocket {
       } catch (error) {
         clearTimeout(timer)
         this.handlers.delete(key)
+        this.pending.delete(key)
         reject(error as Error)
       }
     })
@@ -169,6 +184,7 @@ export class CoapSocket {
         // Deregister the handler first so a push racing the cancellation is
         // dropped rather than delivered after the caller has stopped listening.
         this.handlers.delete(key)
+        this.observers.delete(key)
         if (!this.closed) {
           try {
             this.transmit('GET', path, token, 1)
@@ -183,7 +199,13 @@ export class CoapSocket {
   close(): void {
     if (this.closed) return
     this.closed = true
+    for (const { timer, reject } of this.pending.values()) {
+      clearTimeout(timer)
+      reject(new Error('CoAP socket closed'))
+    }
+    this.pending.clear()
     this.handlers.clear()
+    this.observers.clear()
     try {
       this.socket.close()
     } catch {

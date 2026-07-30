@@ -4,6 +4,9 @@ import { CoapOption, decode, encode, findOption, uintToBuffer } from '../src/air
 import { CoapSocket } from '../src/airctrl/coap/socket.js'
 
 const CONTENT_2_05 = 69
+// Longer than vitest's default 5s test timeout, so a regression that makes
+// close() leak the pending timer (rather than rejecting promptly) fails loudly.
+const DEFAULT_LONG_TIMEOUT_MS = 20000
 
 /** A scriptable fake CoAP device on localhost. */
 function fakeDevice(handler: (request: ReturnType<typeof decode>, reply: (m: Parameters<typeof encode>[0]) => void, remote: dgram.RemoteInfo) => void) {
@@ -89,6 +92,18 @@ describe('CoapSocket.request', () => {
     await expect(socket.request({ method: 'GET', path: '/x', timeoutMs: 100 })).rejects.toThrow(/timeout/)
     expect(socket.pendingCount).toBe(0)
   })
+
+  it('close() rejects an in-flight request promptly instead of leaking its timer', async () => {
+    device = fakeDevice(() => { /* never replies */ })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    const pending = socket.request({ method: 'GET', path: '/x', timeoutMs: DEFAULT_LONG_TIMEOUT_MS })
+    const rejection = expect(pending).rejects.toThrow(/closed/)
+    socket.close()
+    await rejection
+    expect(socket.pendingCount).toBe(0)
+  })
 })
 
 describe('CoapSocket.observe', () => {
@@ -146,5 +161,29 @@ describe('CoapSocket.observe', () => {
     await new Promise(resolve => setTimeout(resolve, 100))
     expect(pushes).toEqual([])
     expect(socket.pendingCount).toBe(0)
+  })
+
+  it('propagates a socket-level error to a live observation onError', async () => {
+    device = fakeDevice((request, reply) => {
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from('first') })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    const errors: Error[] = []
+    const observation = await socket.observe({
+      path: '/sys/dev/status',
+      onNotify: () => {},
+      onError: error => errors.push(error),
+    })
+    expect(observation.first.payload.toString()).toBe('first')
+
+    // The underlying dgram socket is a private implementation detail; poke its
+    // 'error' event directly rather than trying to provoke a real network error.
+    const underlying = (socket as unknown as { socket: { emit: (event: string, error: Error) => void } }).socket
+    underlying.emit('error', new Error('ENETUNREACH'))
+
+    expect(errors).toHaveLength(1)
+    expect(errors[0]!.message).toBe('ENETUNREACH')
   })
 })
