@@ -11,7 +11,7 @@ TypeScript inside this package. No Python, no external protocol library.
 
 It is the HomeKit counterpart to two existing projects by the same author:
 
-- [`ha-philips-airpurifier`](https://github.com/ruaan-deysel/ha-philips-airpurifier) — Home Assistant integration (entity model, 61-model registry)
+- [`ha-philips-airpurifier`](https://github.com/ruaan-deysel/ha-philips-airpurifier) — Home Assistant integration (entity model, 62-model registry)
 - [`philips-airctrl`](https://github.com/ruaan-deysel/philips-airctrl) — Python CoAP library (protocol, discovery)
 
 Existing Homebridge plugins for these devices shell out to the Python
@@ -196,7 +196,7 @@ src/
     schema.ts         zod schemas for the two trust boundaries
   device/
     keys.ts           const.py PhilipsApi keys + sensor/filter/light tables
-    models.ts         device_models.py → DEVICE_MODELS (61 entries, pure data)
+    models.ts         device_models.py → DEVICE_MODELS (62 entries, pure data)
     coordinator.ts    coordinator.py port — observe + watchdog + backoff reconnect
 homebridge-ui/
   public/index.html   scan / manual add / configured device list
@@ -260,7 +260,7 @@ Writes are not optimistically applied; the observe stream is the source of truth
 
 ## Device support scope
 
-The full 61-model registry is ported (it is pure data, so the cost is mechanical),
+The full 62-model registry is ported (it is pure data, so the cost is mechanical),
 but v1 claims **verified** support only for the AC4220/12 that could be tested.
 All other models run through the same data-driven path and are documented as
 untested.

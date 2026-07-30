@@ -28,7 +28,7 @@
 
 **User decisions (already made):**
 - Presets map to **discrete `RotationSpeed` steps**, not one switch per preset and not a Television input selector.
-- v1 ports the full 61-model registry but claims **verified support only for AC4220/12** plus a generation-based generic fallback.
+- v1 ports the full 62-model registry but claims **verified support only for AC4220/12** plus a generation-based generic fallback.
 - Setup is **network scan with manual-IP fallback** in a custom UI, not manual-only and not a plain generated form.
 - Development uses a **local spike for the inner loop, then deploy to Unraid** — not deploy-every-iteration, not mock-first.
 - Code review uses **CodeRabbit CLI plus a Codex adversarial pass**.
@@ -1880,7 +1880,7 @@ no third-party transport."
 - [ ] `resolveModel` prefers an exact match over the family prefix (asserted by identity on `AC0850/81`)
 - [ ] `resolveModel` on an unknown string returns a generic config for the given generation
 - [ ] `deviceKey('D03105#1')` returns `'D03105'`
-- [ ] All 61 models from the HA registry are present in `DEVICE_MODELS`
+- [ ] All 62 models from the HA registry are present in `DEVICE_MODELS`
 - [ ] AC4220's config lists 5 speeds and the auto/sleep presets ONLY — turbo (`D0310C=18`) and medium (`19`) are deliberately excluded as hardware-verified duplicates of speed 5 and speed 3
 - [ ] `keys.ts` documents the four hardware-verified quirks: `D03105` read-only, `D03130` is 0/100, `D03135` is the real light control, `D03137` is not writable
 
@@ -1899,7 +1899,7 @@ grep -n 'NEW2_\|^    [A-Z_]* = ' /tmp/ha-ref/custom_components/philips_airpurifi
 ```
 
 Source of truth: `const.py` class `PhilipsApi` (keys) and `device_models.py` dict
-`DEVICE_MODELS` (61 entries).
+`DEVICE_MODELS` (62 entries).
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1950,8 +1950,8 @@ describe('resolveModel', () => {
     expect(config.speeds).toEqual({})
   })
 
-  it('has all 61 models from the HA registry', () => {
-    expect(Object.keys(DEVICE_MODELS)).toHaveLength(61)
+  it('has all 62 models from the HA registry', () => {
+    expect(Object.keys(DEVICE_MODELS)).toHaveLength(62)
   })
 })
 ```
@@ -2131,7 +2131,7 @@ const CONFIG_AC4220 = config({
 })
 
 /**
- * All 61 models from DEVICE_MODELS in device_models.py.
+ * All 62 models from DEVICE_MODELS in device_models.py.
  *
  * Port every remaining entry using the same shape. Keys are the registry's model
  * strings (e.g. 'AC0850/11 AWS_Philips_AIR', 'AC2889', 'CX7550'). Only AC4220 is
@@ -2140,7 +2140,7 @@ const CONFIG_AC4220 = config({
 export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
   AC4220: CONFIG_AC4220,
   AC4221: CONFIG_AC4220,
-  // ... port the other 59 entries from device_models.py here
+  // ... port the other 60 entries from device_models.py here
 }
 
 /**
@@ -2179,7 +2179,7 @@ top to bottom. For each entry transcribe `api_generation`, `preset_modes`,
 (AC1214 only, out of scope). Confirm the count:
 
 ```bash
-npx vitest run test/models.test.ts -t 'all 61 models'
+npx vitest run test/models.test.ts -t 'all 62 models'
 ```
 
 - [ ] **Step 7: Run the full test file**
@@ -2196,7 +2196,7 @@ Expected: PASS, all tests.
 git add src/device/keys.ts src/device/models.ts test/models.test.ts
 git commit -m "Port device key and model capability tables
 
-61 models transcribed from the HA integration's DEVICE_MODELS registry.
+62 models transcribed from the HA integration's DEVICE_MODELS registry.
 Resolution is exact match, then 6-char family prefix, then a generic
 config — AC4220/12 resolves via the AC4220 prefix.
 
