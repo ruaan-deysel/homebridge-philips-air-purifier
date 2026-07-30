@@ -80,16 +80,58 @@ correct.
 
 ### CoAP transport
 
-`coap` npm 1.5.0 (published 2025-11-03) is the only viable Node CoAP library.
+CoAP is implemented in this package over `node:dgram`, with **no third-party
+dependency**. The `coap` npm package was evaluated and rejected.
 
-- Philips' `Unreliable` transport tuning maps to `confirmable: false`
-- Status is only served through Observe, so a read must send `observe: true`
-  even when it is a one-shot
-- `Max-Age` is read from `res.headers['Max-Age']` (60 on this device)
-- **Known limitation:** the library has no proactive observe cancellation
-  ([coapjs/node-coap#195](https://github.com/coapjs/node-coap/issues/195)). Only
-  reactive teardown via `stream.close()` is available. Acceptable here; it would
-  matter for firmware with a single observer slot.
+The needed protocol surface is tiny — non-confirmable messages, `GET` and `POST`,
+three options (`Uri-Path`, `Observe`, `Max-Age`), and four URIs. `coap` 1.5.0 also
+carries CON/ACK retransmission, block-wise transfer, server mode, and multicast,
+none of which this plugin uses, plus eight transitive dependencies including
+`coap-packet`, last published 2022-02-03.
+
+Writing it ourselves is roughly 200 lines, and it removes a real limitation
+rather than merely trading one cost for another:
+
+| | `coap` 1.5.0 | Own implementation |
+|---|---|---|
+| Runtime dependencies | 8 transitive | 0 |
+| Proactive observe cancellation | **not supported** ([#195](https://github.com/coapjs/node-coap/issues/195)) | supported |
+| Observe sequence number | not exposed | available |
+| Unused protocol surface | CON/ACK, block-wise, server, multicast | none |
+
+Verified against the real device with a hand-written codec:
+
+```
+codec self-check: PASS
+[1] info code 2.05 -> {"modelid":"AC4220/12","name":"Office 1",…}
+[2] sync code 2.05 -> clientKey 6624FB8E
+[3] status code 2.05 | Max-Age 60 | Observe seq 900
+[4] decrypted 59 keys | model AC4220/12
+[5] pushes in 6s: 2
+[6] after proactive cancel, further pushes: 0
+```
+
+Scope, deliberately minimal:
+
+- **Message type NON only** (`type = 1`). Philips firmware uses non-confirmable
+  messages, which is what the Python client's `Unreliable` transport tuning
+  selects. No retransmission or ACK state machine is needed.
+- **Methods `GET` (0.01) and `POST` (0.02)** only.
+- **Options** `Uri-Path` (11, repeatable), `Observe` (6), `Max-Age` (14). Option
+  deltas and lengths use the standard 13/14 extension nibbles.
+- **Responses** are matched to requests by token, not message ID, which is what
+  makes observe notifications work — every notification carries the original
+  request's token.
+- **Observe registration** sends `Observe: 0`; **cancellation** sends the same
+  token with `Observe: 1`. Confirmed to stop notifications on real hardware.
+- **Not implemented:** CON/ACK, RST handling beyond ignoring it, block-wise
+  transfer (`Block1`/`Block2`), DTLS, server mode, multicast discovery. If a
+  device ever needs block-wise transfer for a large status payload, that is the
+  one likely extension point — the AC4220's 59-key payload fits in a single
+  datagram.
+
+Status is only served through Observe, so even a one-shot read must send the
+Observe option; the registration is then cancelled immediately.
 
 ### Endpoints
 
@@ -109,6 +151,9 @@ src/
   platform.ts         DynamicPlatformPlugin — reconcile config ↔ cached accessories
   accessory.ts        one device → AirPurifier + linked services
   airctrl/
+    coap/
+      message.ts      RFC 7252 encode/decode — pure, no I/O
+      socket.ts       node:dgram transport, token matching, observe
     crypto.ts         encryption.py port — node:crypto only, zero deps
     client.ts         client.py port — sync / status / observe / control / info
     discovery.ts      subnet sweep via plaintext /sys/dev/info
@@ -124,12 +169,20 @@ test/
   fixtures/           golden payloads captured from real hardware
   *.test.ts           vitest
 scripts/
-  spike.mjs           standalone hardware probe (already written and passing)
+  spike.mjs           standalone hardware probe (written, passing)
+  coap-spike.mjs      own-CoAP proof: codec self-check + live device (passing)
+  explore.mjs         key-domain probes (written, passing)
+  explore2.mjs        display/light control probes (written, passing)
   deploy.sh           npm pack → ssh Unraid → install → restart Homebridge
 ```
 
 Each unit has one job and a narrow interface:
 
+- `coap/message.ts` — pure `encode`/`decode` of CoAP datagrams. No sockets, no
+  Philips knowledge, fully testable on byte arrays.
+- `coap/socket.ts` — a UDP socket that maps requests to responses by token and
+  exposes `request()` and `observe()`. Knows nothing about Philips either, so it
+  is the only place `node:dgram` appears.
 - `crypto.ts` — pure functions, no I/O. `encrypt(key, text)`, `decrypt(blob)`, `nextKey(key)`.
 - `client.ts` — one device's CoAP conversation. Knows nothing about HomeKit or models.
 - `coordinator.ts` — owns liveness for one device: connect, observe, detect loss,
