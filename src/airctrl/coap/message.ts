@@ -152,6 +152,9 @@ export function decode(buffer: Buffer): DecodedCoapMessage {
     offset += length
   }
 
+  if (buffer[offset] === PAYLOAD_MARKER && offset + 1 === buffer.length) {
+    throw new Error('CoAP payload marker without payload')
+  }
   const payload = buffer[offset] === PAYLOAD_MARKER ? buffer.subarray(offset + 1) : Buffer.alloc(0)
   return { type, code, messageId, token, options, payload }
 }

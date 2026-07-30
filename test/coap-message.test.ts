@@ -108,6 +108,7 @@ describe('decode', () => {
     expect(() => decode(Buffer.from('44010001deadbe', 'hex'))).toThrow(/truncated/) // token
     expect(() => decode(Buffer.from('54450001deadbeefd0', 'hex'))).toThrow(/truncated/) // option extension
     expect(() => decode(Buffer.from('400100011361', 'hex'))).toThrow(/truncated/) // option value
+    expect(() => decode(Buffer.from('54450001deadbeefff', 'hex'))).toThrow(/payload marker/)
     expect(() => decode(Buffer.from([0x40, 0x01, 0x00, 0x01, 0xF0]))).toThrow(/reserved/) // nibble 15
   })
 
