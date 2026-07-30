@@ -9,7 +9,7 @@ import type {
 import type { DeviceConfig, DeviceStatus } from './airctrl/schema.js'
 import type { DeviceCoordinator } from './device/coordinator.js'
 import { Gen1Key, Gen2Key, Gen3Key } from './device/keys.js'
-import { ApiGeneration, type DeviceModelConfig, powerValues } from './device/models.js'
+import { ApiGeneration, deviceKey, type DeviceModelConfig, powerValues } from './device/models.js'
 import {
   airQualityFromPm25,
   beepFromValue,
@@ -17,8 +17,6 @@ import {
   booleanFromValue,
   booleanValue,
   filterLifePercent,
-  lampFromValue,
-  lampValue,
   modeFromRotationSpeed,
   rotationSpeedFromMode,
   temperatureFromRaw,
@@ -39,8 +37,11 @@ export class PhilipsAirAccessory {
   private temperature?: HapService
   private humidity?: HapService
   private preFilter?: HapService
+  private preFilterKeys?: [string, string]
   private nanoFilter?: HapService
+  private nanoFilterKeys?: [string, string]
   private light?: HapService
+  private lightControl?: { key: string, on: string | number, off: string | number }
   private sleep?: HapService
   private autoPlus?: HapService
   private beep?: HapService
@@ -76,36 +77,37 @@ export class PhilipsAirAccessory {
     const childLock = this.purifier.getCharacteristic(C.LockPhysicalControls)
     rotationSpeed.setProps({ minStep: 100 / Math.max(1, Object.keys(model.speeds).length) })
 
-    this.onGet(active, device => booleanFromValue(device[this.power.key])
+    this.onGet(active, device => this.powered(device)
       ? C.Active.ACTIVE
       : C.Active.INACTIVE)
     active.onSet(value => this.write({
       [this.power.key]: value === C.Active.ACTIVE ? this.power.on : this.power.off,
     }))
-    this.onGet(currentState, device => booleanFromValue(device[this.power.key])
+    this.onGet(currentState, device => this.powered(device)
       ? C.CurrentAirPurifierState.PURIFYING_AIR
       : C.CurrentAirPurifierState.INACTIVE)
-    this.onGet(targetState, device => this.mode(device) === 0
+    this.onGet(targetState, device => this.matchesControl(device, this.model.presetModes.auto)
       ? C.TargetAirPurifierState.AUTO
       : C.TargetAirPurifierState.MANUAL)
     targetState.onSet(value => {
       if (value === C.TargetAirPurifierState.AUTO) {
-        return this.write(this.model.presetModes.auto ?? {
-          [this.power.key]: this.power.on,
-          [Gen3Key.MODE_B]: 0,
-        })
+        const control = this.model.presetModes.auto
+        if (!control) throw this.communicationError()
+        return this.write(control)
       }
-      return this.write(Object.values(this.model.speeds)[this.lastManualMode - 1] ?? {
-        [this.power.key]: this.power.on,
-        [Gen3Key.MODE_B]: this.lastManualMode,
-      })
+      const control = Object.values(this.model.speeds)[this.lastManualMode - 1]
+      if (!control) throw this.communicationError()
+      return this.write(control)
     })
-    this.onGet(rotationSpeed, device =>
-      rotationSpeedFromMode(this.mode(device), Object.keys(this.model.speeds).length))
+    this.onGet(rotationSpeed, device => this.powered(device)
+      ? rotationSpeedFromMode(this.speedMode(device), Object.keys(this.model.speeds).length)
+      : 0)
     rotationSpeed.onSet(value => {
+      if (Number(value) <= 0) return this.write({ [this.power.key]: this.power.off })
       const mode = modeFromRotationSpeed(Number(value), Object.keys(this.model.speeds).length)
-      if (mode === null) return this.write({ [this.power.key]: this.power.off })
-      return this.write(Object.values(this.model.speeds)[mode - 1]!)
+      const control = mode === null ? undefined : Object.values(this.model.speeds)[mode - 1]
+      if (!control) throw this.communicationError()
+      return this.write(control)
     })
     this.onGet(childLock, device => booleanFromValue(device[this.childLockKey])
       ? C.LockPhysicalControls.CONTROL_LOCK_ENABLED
@@ -119,59 +121,68 @@ export class PhilipsAirAccessory {
     this.onGet(pm25, device => this.number(device[this.pm25Key]))
     this.onGet(airQuality, device => airQualityFromPm25(device[this.pm25Key]))
 
-    if (status && Gen3Key.TEMPERATURE in status && !model.unavailableSensors.includes(Gen3Key.TEMPERATURE)) {
+    const temperatureKey = this.temperatureKey
+    if (status && temperatureKey && temperatureKey in status) {
       this.temperature = accessory.getService(S.TemperatureSensor)
         ?? accessory.addService(S.TemperatureSensor, `${accessory.displayName} Temperature`)
       this.purifier.addLinkedService(this.temperature)
       this.onGet(
         this.temperature.getCharacteristic(C.CurrentTemperature),
-        device => temperatureFromRaw(device[Gen3Key.TEMPERATURE]),
+        device => this.temperatureValue(device[temperatureKey]),
       )
     } else {
       const cached = accessory.getService(S.TemperatureSensor)
       if (cached) accessory.removeService(cached)
     }
 
-    if (status && Gen3Key.HUMIDITY in status && !model.unavailableSensors.includes(Gen3Key.HUMIDITY)) {
+    const humidityKey = this.humidityKey
+    if (status && humidityKey && humidityKey in status) {
       this.humidity = accessory.getService(S.HumiditySensor)
         ?? accessory.addService(S.HumiditySensor, `${accessory.displayName} Humidity`)
       this.purifier.addLinkedService(this.humidity)
       this.onGet(
         this.humidity.getCharacteristic(C.CurrentRelativeHumidity),
-        device => this.number(device[Gen3Key.HUMIDITY]),
+        device => this.number(device[humidityKey]),
       )
     } else {
       const cached = accessory.getService(S.HumiditySensor)
       if (cached) accessory.removeService(cached)
     }
 
-    if (status && (Gen3Key.FILTER_PREFILTER in status || Gen3Key.FILTER_PREFILTER_TOTAL in status)) {
+    this.preFilterKeys = status ? this.filterKeys(status, 'pre') : undefined
+    if (this.preFilterKeys) {
       this.preFilter = accessory.getServiceById(S.FilterMaintenance, 'pre-filter')
         ?? accessory.addService(S.FilterMaintenance, 'Pre-Filter', 'pre-filter')
       this.purifier.addLinkedService(this.preFilter)
-      this.wireFilter(this.preFilter, Gen3Key.FILTER_PREFILTER, Gen3Key.FILTER_PREFILTER_TOTAL)
+      this.wireFilter(this.preFilter, ...this.preFilterKeys)
     } else {
       const cached = accessory.getServiceById(S.FilterMaintenance, 'pre-filter')
       if (cached) accessory.removeService(cached)
     }
 
-    if (status && (Gen3Key.FILTER_NANOPROTECT in status || Gen3Key.FILTER_NANOPROTECT_TOTAL in status)) {
+    this.nanoFilterKeys = status ? this.filterKeys(status, 'nano') : undefined
+    if (this.nanoFilterKeys) {
       this.nanoFilter = accessory.getServiceById(S.FilterMaintenance, 'nano-protect')
         ?? accessory.addService(S.FilterMaintenance, 'NanoProtect Filter', 'nano-protect')
       this.purifier.addLinkedService(this.nanoFilter)
-      this.wireFilter(this.nanoFilter, Gen3Key.FILTER_NANOPROTECT, Gen3Key.FILTER_NANOPROTECT_TOTAL)
+      this.wireFilter(this.nanoFilter, ...this.nanoFilterKeys)
     } else {
       const cached = accessory.getServiceById(S.FilterMaintenance, 'nano-protect')
       if (cached) accessory.removeService(cached)
     }
 
     const cachedLight = accessory.getServiceById(S.Lightbulb, 'lamp')
-    if (config.exposeLight && model.lights.includes(Gen3Key.LAMP_MODE)) {
+    this.lightControl = status
+      ? model.lights.map(key => this.lightValues(key)).find(control => control && control.key in status)
+      : undefined
+    if (config.exposeLight && this.lightControl) {
       this.light = cachedLight ?? accessory.addService(S.Lightbulb, 'Lamp', 'lamp')
       this.purifier.addLinkedService(this.light)
       const on = this.light.getCharacteristic(C.On)
-      this.onGet(on, device => lampFromValue(device[Gen3Key.LAMP_MODE]))
-      on.onSet(value => this.write({ [Gen3Key.LAMP_MODE]: lampValue(Boolean(value)) }))
+      this.onGet(on, device => device[this.lightControl!.key] !== this.lightControl!.off)
+      on.onSet(value => this.write({
+        [this.lightControl!.key]: value ? this.lightControl!.on : this.lightControl!.off,
+      }))
     } else if (cachedLight) {
       accessory.removeService(cachedLight)
     }
@@ -181,10 +192,13 @@ export class PhilipsAirAccessory {
       this.sleep = cachedSleep ?? accessory.addService(S.Switch, 'Sleep Mode', 'sleep')
       this.purifier.addLinkedService(this.sleep)
       const on = this.sleep.getCharacteristic(C.On)
-      this.onGet(on, device => booleanFromValue(device[this.power.key]) && this.mode(device) === 17)
-      on.onSet(value => this.write(value
-        ? this.model.presetModes.sleep!
-        : this.model.presetModes.auto!))
+      this.onGet(on, device =>
+        this.powered(device) && this.matchesControl(device, this.model.presetModes.sleep))
+      on.onSet(value => {
+        const control = value ? this.model.presetModes.sleep : this.model.presetModes.auto
+        if (!control) throw this.communicationError()
+        return this.write(control)
+      })
     } else if (cachedSleep) {
       accessory.removeService(cachedSleep)
     }
@@ -240,20 +254,95 @@ export class PhilipsAirAccessory {
     }
   }
 
-  private get modeKey(): string {
-    switch (this.model.apiGeneration) {
-      case ApiGeneration.Gen2: return Gen2Key.MODE
-      case ApiGeneration.Gen3: return Gen3Key.MODE_B
-      default: return Gen1Key.MODE
-    }
+  private get temperatureKey(): string | undefined {
+    const key = this.model.apiGeneration === ApiGeneration.Gen1
+      ? Gen1Key.TEMPERATURE
+      : this.model.apiGeneration === ApiGeneration.Gen3 ? Gen3Key.TEMPERATURE : undefined
+    return key && !this.unavailable(this.model.unavailableSensors, key) ? key : undefined
   }
 
-  private mode(status: DeviceStatus): unknown {
-    return status[this.modeKey]
+  private get humidityKey(): string | undefined {
+    const key = this.model.apiGeneration === ApiGeneration.Gen1
+      ? Gen1Key.HUMIDITY
+      : this.model.apiGeneration === ApiGeneration.Gen3 ? Gen3Key.HUMIDITY : undefined
+    return key && !this.unavailable(this.model.unavailableSensors, key) ? key : undefined
+  }
+
+  private unavailable(keys: string[], key: string): boolean {
+    return keys.some(value => deviceKey(value) === key)
+  }
+
+  private filterKeys(status: DeviceStatus, kind: 'pre' | 'nano'): [string, string] | undefined {
+    const unavailableKey = kind === 'pre'
+      ? Gen1Key.FILTER_NANOPROTECT_PREFILTER
+      : Gen1Key.FILTER_NANOPROTECT
+    if (this.unavailable(this.model.unavailableFilters, unavailableKey)) return undefined
+
+    const candidates: [string, string][] = this.model.apiGeneration === ApiGeneration.Gen3
+      ? [kind === 'pre'
+          ? [Gen3Key.FILTER_PREFILTER, Gen3Key.FILTER_PREFILTER_TOTAL]
+          : [Gen3Key.FILTER_NANOPROTECT, Gen3Key.FILTER_NANOPROTECT_TOTAL]]
+      : this.model.apiGeneration === ApiGeneration.Gen1
+        ? kind === 'pre'
+          ? [
+              [Gen1Key.FILTER_NANOPROTECT_PREFILTER, Gen1Key.FILTER_NANOPROTECT_CLEAN_TOTAL],
+              [Gen1Key.FILTER_PRE, Gen1Key.FILTER_PRE_TOTAL],
+            ]
+          : [
+              [Gen1Key.FILTER_NANOPROTECT, Gen1Key.FILTER_NANOPROTECT_TOTAL],
+              [Gen1Key.FILTER_HEPA, Gen1Key.FILTER_HEPA_TOTAL],
+            ]
+        : []
+    return candidates.find(([remaining, total]) => remaining in status && total in status)
+  }
+
+  private lightValues(registryKey: string): {
+    key: string
+    on: string | number
+    off: string | number
+  } | undefined {
+    const key = deviceKey(registryKey)
+    if (key === Gen1Key.DISPLAY_BACKLIGHT) return { key, on: '1', off: '0' }
+    if (
+      key === Gen1Key.LIGHT_BRIGHTNESS
+      || key === Gen2Key.DISPLAY_BACKLIGHT
+      || key === Gen3Key.DISPLAY_BACKLIGHT_PRIMARY
+    ) return { key, on: 100, off: 0 }
+    if (registryKey.startsWith(`${Gen3Key.DISPLAY_BACKLIGHT}#`)) return { key, on: 123, off: 0 }
+    if (key === Gen3Key.DISPLAY_BACKLIGHT) return { key, on: 100, off: 0 }
+    if (key === Gen3Key.LAMP_MODE) return { key, on: 1, off: 0 }
+    return undefined
+  }
+
+  private powered(status: DeviceStatus): boolean {
+    return status[this.power.key] === this.power.on
+  }
+
+  private matchesControl(
+    status: DeviceStatus,
+    control: Record<string, string | number> | undefined,
+  ): boolean {
+    if (!control) return false
+    const entries = Object.entries(control)
+      .filter(([key]) => deviceKey(key) !== this.power.key)
+    return entries.length > 0
+      && entries.every(([key, value]) => status[deviceKey(key)] === value)
+  }
+
+  private speedMode(status: DeviceStatus): number | null {
+    const index = Object.values(this.model.speeds)
+      .findIndex(control => this.matchesControl(status, control))
+    return index === -1 ? null : index + 1
   }
 
   private number(value: unknown): number {
     return typeof value === 'number' && Number.isFinite(value) ? value : 0
+  }
+
+  private temperatureValue(value: unknown): number {
+    return this.model.apiGeneration === ApiGeneration.Gen3
+      ? temperatureFromRaw(value)
+      : this.number(value)
   }
 
   private communicationError(): InstanceType<API['hap']['HapStatusError']> {
@@ -316,11 +405,9 @@ export class PhilipsAirAccessory {
   private updateCharacteristics(status: DeviceStatus): void {
     const C = this.platform.Characteristic
     const speedCount = Object.keys(this.model.speeds).length
-    const mode = this.mode(status)
-    if (typeof mode === 'number' && Number.isInteger(mode) && mode >= 1 && mode <= speedCount) {
-      this.lastManualMode = mode
-    }
-    const powered = booleanFromValue(status[this.power.key])
+    const mode = this.speedMode(status)
+    if (mode !== null) this.lastManualMode = mode
+    const powered = this.powered(status)
 
     this.update(this.purifier.getCharacteristic(C.Active), powered ? C.Active.ACTIVE : C.Active.INACTIVE)
     this.update(
@@ -329,11 +416,13 @@ export class PhilipsAirAccessory {
     )
     this.update(
       this.purifier.getCharacteristic(C.TargetAirPurifierState),
-      mode === 0 ? C.TargetAirPurifierState.AUTO : C.TargetAirPurifierState.MANUAL,
+      this.matchesControl(status, this.model.presetModes.auto)
+        ? C.TargetAirPurifierState.AUTO
+        : C.TargetAirPurifierState.MANUAL,
     )
     this.update(
       this.purifier.getCharacteristic(C.RotationSpeed),
-      rotationSpeedFromMode(mode, speedCount),
+      powered ? rotationSpeedFromMode(mode, speedCount) : 0,
     )
     this.update(
       this.purifier.getCharacteristic(C.LockPhysicalControls),
@@ -349,31 +438,31 @@ export class PhilipsAirAccessory {
       this.airQuality.getCharacteristic(C.AirQuality),
       airQualityFromPm25(status[this.pm25Key]),
     )
-    if (this.temperature) this.update(
+    if (this.temperature && this.temperatureKey) this.update(
       this.temperature.getCharacteristic(C.CurrentTemperature),
-      temperatureFromRaw(status[Gen3Key.TEMPERATURE]),
+      this.temperatureValue(status[this.temperatureKey]),
     )
-    if (this.humidity) this.update(
+    if (this.humidity && this.humidityKey) this.update(
       this.humidity.getCharacteristic(C.CurrentRelativeHumidity),
-      this.number(status[Gen3Key.HUMIDITY]),
+      this.number(status[this.humidityKey]),
     )
-    if (this.preFilter) this.updateFilter(
+    if (this.preFilter && this.preFilterKeys) this.updateFilter(
       this.preFilter,
-      status[Gen3Key.FILTER_PREFILTER],
-      status[Gen3Key.FILTER_PREFILTER_TOTAL],
+      status[this.preFilterKeys[0]],
+      status[this.preFilterKeys[1]],
     )
-    if (this.nanoFilter) this.updateFilter(
+    if (this.nanoFilter && this.nanoFilterKeys) this.updateFilter(
       this.nanoFilter,
-      status[Gen3Key.FILTER_NANOPROTECT],
-      status[Gen3Key.FILTER_NANOPROTECT_TOTAL],
+      status[this.nanoFilterKeys[0]],
+      status[this.nanoFilterKeys[1]],
     )
-    if (this.light) this.update(
+    if (this.light && this.lightControl) this.update(
       this.light.getCharacteristic(C.On),
-      lampFromValue(status[Gen3Key.LAMP_MODE]),
+      status[this.lightControl.key] !== this.lightControl.off,
     )
     if (this.sleep) this.update(
       this.sleep.getCharacteristic(C.On),
-      powered && mode === 17,
+      powered && this.matchesControl(status, this.model.presetModes.sleep),
     )
     if (this.autoPlus) this.update(
       this.autoPlus.getCharacteristic(C.On),

@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { PhilipsAirAccessory, type PhilipsAirPlatformLike } from '../src/accessory.js'
 import type { DeviceCoordinator } from '../src/device/coordinator.js'
 import { Gen3Key } from '../src/device/keys.js'
-import { resolveModel } from '../src/device/models.js'
+import { resolveModel, type DeviceModelConfig } from '../src/device/models.js'
 import type { DeviceConfig, DeviceStatus } from '../src/airctrl/schema.js'
 
 const capturedStatus = JSON.parse(readFileSync(
@@ -16,8 +16,13 @@ const capturedStatus = JSON.parse(readFileSync(
 
 class FakeCoordinator extends EventEmitter {
   available = true
-  status: DeviceStatus | null = { ...capturedStatus }
+  status: DeviceStatus | null
   setControl = vi.fn(async (_values: Record<string, unknown>) => true)
+
+  constructor(status: DeviceStatus = capturedStatus) {
+    super()
+    this.status = { ...status }
+  }
 
   publish(changes: DeviceStatus): void {
     this.status = { ...this.status, ...changes }
@@ -39,12 +44,16 @@ const deviceConfig: DeviceConfig = {
   exposeLight: true,
 }
 
-function setup(config: DeviceConfig = deviceConfig): {
+function setup(
+  config: DeviceConfig = deviceConfig,
+  status: DeviceStatus = capturedStatus,
+  model: DeviceModelConfig = resolveModel('AC4220/12'),
+): {
   accessory: Accessory
   coordinator: FakeCoordinator
 } {
   const accessory = new Accessory('Office', uuid.generate('office'))
-  const coordinator = new FakeCoordinator()
+  const coordinator = new FakeCoordinator(status)
   const log = Object.assign(vi.fn(), {
     debug: vi.fn(),
     info: vi.fn(),
@@ -65,7 +74,7 @@ function setup(config: DeviceConfig = deviceConfig): {
     platform,
     accessory as unknown as PlatformAccessory,
     coordinator as unknown as DeviceCoordinator,
-    resolveModel('AC4220/12'),
+    model,
     config,
   )
   return { accessory, coordinator }
@@ -246,5 +255,107 @@ describe('PhilipsAirAccessory', () => {
     expect(accessory.getServiceById(Service.Switch, 'sleep')).toBeUndefined()
     expect(accessory.getServiceById(Service.Switch, 'auto-plus')).toBeUndefined()
     expect(accessory.getServiceById(Service.Switch, 'beep')).toBeUndefined()
+  })
+
+  it('maps Gen1 power, presets, ladder state, sensors, filters, and light from registry keys', async () => {
+    const status = {
+      pwr: '1',
+      mode: 'AG',
+      om: 'a',
+      pm25: 8,
+      temp: 21,
+      rh: 45,
+      uil: '1',
+      'D05-13': 175,
+      'D05-07': 720,
+      'D05-14': 1374,
+      'D05-08': 9600,
+    }
+    const { accessory, coordinator } = setup(deviceConfig, status, resolveModel('AC3858/50'))
+    const purifier = accessory.getService(Service.AirPurifier)!
+
+    await expect(purifier.getCharacteristic(Characteristic.Active).handleGetRequest())
+      .resolves.toBe(Characteristic.Active.ACTIVE)
+    await expect(purifier.getCharacteristic(Characteristic.TargetAirPurifierState).handleGetRequest())
+      .resolves.toBe(Characteristic.TargetAirPurifierState.AUTO)
+    await expect(accessory.getService(Service.TemperatureSensor)!
+      .getCharacteristic(Characteristic.CurrentTemperature).handleGetRequest()).resolves.toBe(21)
+    await expect(accessory.getService(Service.HumiditySensor)!
+      .getCharacteristic(Characteristic.CurrentRelativeHumidity).handleGetRequest()).resolves.toBe(45)
+    await expect(accessory.getServiceById(Service.FilterMaintenance, 'pre-filter')!
+      .getCharacteristic(Characteristic.FilterLifeLevel).handleGetRequest()).resolves.toBe(24)
+    await expect(accessory.getServiceById(Service.FilterMaintenance, 'nano-protect')!
+      .getCharacteristic(Characteristic.FilterLifeLevel).handleGetRequest()).resolves.toBe(14)
+
+    const light = accessory.getServiceById(Service.Lightbulb, 'lamp')!
+    await expect(light.getCharacteristic(Characteristic.On).handleGetRequest()).resolves.toBe(true)
+    await light.getCharacteristic(Characteristic.On).handleSetRequest(false)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ uil: '0' })
+
+    coordinator.publish({ mode: 'M', om: '2' })
+    await expect(purifier.getCharacteristic(Characteristic.RotationSpeed).handleGetRequest())
+      .resolves.toBe(75)
+  })
+
+  it('maps Gen2 power, Auto target, and ordered ladder state', async () => {
+    const { accessory, coordinator } = setup(deviceConfig, {
+      'D03-02': 'ON',
+      'D03-12': 'Auto General',
+      'D03-33': 8,
+      'D03-05': 1,
+    }, resolveModel('AC1715'))
+    const purifier = accessory.getService(Service.AirPurifier)!
+
+    await expect(purifier.getCharacteristic(Characteristic.Active).handleGetRequest())
+      .resolves.toBe(Characteristic.Active.ACTIVE)
+    await expect(purifier.getCharacteristic(Characteristic.TargetAirPurifierState).handleGetRequest())
+      .resolves.toBe(Characteristic.TargetAirPurifierState.AUTO)
+
+    coordinator.publish({ 'D03-12': 'Speed 2' })
+    await expect(purifier.getCharacteristic(Characteristic.RotationSpeed).handleGetRequest())
+      .resolves.toBe(75)
+  })
+
+  it('maps non-ladder Gen3 mode values by ordered model speed writes', async () => {
+    const { accessory } = setup(deviceConfig, {
+      [Gen3Key.POWER]: 1,
+      [Gen3Key.MODE_B]: 19,
+      [Gen3Key.PM25]: 8,
+      [Gen3Key.DISPLAY_BACKLIGHT]: 1,
+      [Gen3Key.FILTER_PREFILTER]: 100,
+      [Gen3Key.FILTER_PREFILTER_TOTAL]: 200,
+    }, resolveModel('AC0950'))
+
+    await expect(accessory.getService(Service.AirPurifier)!
+      .getCharacteristic(Characteristic.RotationSpeed).handleGetRequest())
+      .resolves.toBeCloseTo(200 / 3)
+    expect(accessory.getServiceById(Service.Lightbulb, 'lamp')).toBeDefined()
+    expect(accessory.getServiceById(Service.FilterMaintenance, 'pre-filter')).toBeUndefined()
+  })
+
+  it('rejects nonzero RotationSpeed when the model has no speed ladder', async () => {
+    const { accessory, coordinator } = setup(deviceConfig, {
+      pwr: '1',
+      pm25: 8,
+    }, resolveModel('unknown'))
+
+    await expect(accessory.getService(Service.AirPurifier)!
+      .getCharacteristic(Characteristic.RotationSpeed).handleSetRequest(50))
+      .rejects.toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+    expect(coordinator.setControl).not.toHaveBeenCalled()
+  })
+
+  it('rejects Sleep off when the model has no Auto preset', async () => {
+    const base = resolveModel('AC4220/12')
+    const model = {
+      ...base,
+      presetModes: { sleep: base.presetModes.sleep! },
+    }
+    const { accessory, coordinator } = setup(deviceConfig, capturedStatus, model)
+
+    await expect(accessory.getServiceById(Service.Switch, 'sleep')!
+      .getCharacteristic(Characteristic.On).handleSetRequest(false))
+      .rejects.toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+    expect(coordinator.setControl).not.toHaveBeenCalled()
   })
 })
