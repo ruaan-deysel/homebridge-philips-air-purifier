@@ -10,6 +10,7 @@ import { PLATFORM_NAME } from '../src/settings.js'
 interface FakeDevice {
   status?: DeviceStatus
   error?: Error
+  connect?: Promise<void>
 }
 
 class TestPlatformAccessory extends Accessory {
@@ -21,6 +22,7 @@ const fakeClients = vi.hoisted(() => new Map<string, {
   close: ReturnType<typeof vi.fn>
   setControl: ReturnType<typeof vi.fn>
 }>())
+const fakeClientCreations = vi.hoisted(() => new Map<string, number>())
 
 vi.mock('../src/airctrl/client.js', () => ({
   PhilipsCoapClient: class {
@@ -29,9 +31,11 @@ vi.mock('../src/airctrl/client.js', () => ({
 
     constructor(private readonly host: string) {
       fakeClients.set(host, this)
+      fakeClientCreations.set(host, (fakeClientCreations.get(host) ?? 0) + 1)
     }
 
     async connect(): Promise<void> {
+      await fakeDevices.get(this.host)?.connect
       const error = fakeDevices.get(this.host)?.error
       if (error) throw error
     }
@@ -140,6 +144,7 @@ async function launch(mockApi: ReturnType<typeof api>): Promise<void> {
 beforeEach(() => {
   fakeDevices.clear()
   fakeClients.clear()
+  fakeClientCreations.clear()
 })
 
 describe('platform helpers', () => {
@@ -265,6 +270,56 @@ describe('PhilipsAirPlatform', () => {
     mockApi.events.get('shutdown')!()
 
     expect(fakeClients.get('192.0.2.1')?.close).toHaveBeenCalledOnce()
+    expect(fakeClients.get('192.0.2.2')?.close).toHaveBeenCalledOnce()
+  })
+
+  it('does not resume discovery after shutdown interrupts an in-flight startup', async () => {
+    const mockApi = api()
+    let resolveConnect!: () => void
+    const connect = new Promise<void>(resolve => {
+      resolveConnect = resolve
+    })
+    fakeDevices.set('192.0.2.1', { status: gen3Status(), connect })
+    fakeDevices.set('192.0.2.2', {
+      status: { ...gen3Status(), [Gen1Key.DEVICE_ID]: 'second-device-id' },
+    })
+    const platform = new PhilipsAirPlatform(log(), config(['192.0.2.1', '192.0.2.2']), mockApi)
+
+    mockApi.events.get('didFinishLaunching')!()
+    await vi.waitFor(() => expect(fakeClients.has('192.0.2.1')).toBe(true))
+    mockApi.events.get('shutdown')!()
+    resolveConnect()
+    await new Promise(resolve => setImmediate(resolve))
+
+    expect(mockApi.registered).toEqual([])
+    expect(fakeClients.get('192.0.2.1')?.close).toHaveBeenCalledOnce()
+    expect(fakeClientCreations.has('192.0.2.2')).toBe(false)
+    expect((platform as unknown as { coordinators: Set<unknown> }).coordinators).toHaveLength(0)
+  })
+
+  it('sets up a configured host only once', async () => {
+    const mockApi = api()
+    fakeDevices.set('192.0.2.1', { status: gen3Status() })
+    new PhilipsAirPlatform(log(), config(['192.0.2.1', '192.0.2.1']), mockApi)
+
+    mockApi.events.get('didFinishLaunching')!()
+    await new Promise(resolve => setImmediate(resolve))
+
+    expect(fakeClientCreations.get('192.0.2.1')).toBe(1)
+    expect(mockApi.registered).toHaveLength(1)
+  })
+
+  it('cleans up a second host that resolves to an already configured device id', async () => {
+    const mockApi = api()
+    fakeDevices.set('192.0.2.1', { status: gen3Status() })
+    fakeDevices.set('192.0.2.2', { status: gen3Status() })
+    new PhilipsAirPlatform(log(), config(['192.0.2.1', '192.0.2.2']), mockApi)
+
+    mockApi.events.get('didFinishLaunching')!()
+    await new Promise(resolve => setImmediate(resolve))
+
+    expect(mockApi.registered).toHaveLength(1)
+    expect(fakeClients.get('192.0.2.1')?.close).not.toHaveBeenCalled()
     expect(fakeClients.get('192.0.2.2')?.close).toHaveBeenCalledOnce()
   })
 })

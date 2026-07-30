@@ -30,6 +30,7 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
   readonly Characteristic: API['hap']['Characteristic']
   private readonly cached: PlatformAccessory[] = []
   private readonly coordinators = new Set<DeviceCoordinator>()
+  private shuttingDown = false
 
   constructor(
     readonly log: Logging,
@@ -48,6 +49,7 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
   }
 
   private async discoverDevices(): Promise<void> {
+    if (this.shuttingDown) return
     const parsed = PluginConfigSchema.safeParse(this.config)
     if (!parsed.success) {
       this.log.error(`Invalid plugin configuration, doing nothing: ${parsed.error.message}`)
@@ -62,26 +64,42 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
     }
 
     const configuredUuids = new Set<string>()
+    const seenHosts = new Set<string>()
     for (const device of devices) {
+      if (this.shuttingDown) break
+      if (seenHosts.has(device.host)) continue
+      seenHosts.add(device.host)
       try {
-        configuredUuids.add(await this.setUpDevice(device))
+        const uuid = await this.setUpDevice(device, configuredUuids)
+        if (uuid) configuredUuids.add(uuid)
       } catch (error) {
         const cached = this.cached.find(accessory => accessory.context.device?.host === device.host)
         if (cached) configuredUuids.add(cached.UUID)
         this.log.error(`Failed to set up device at ${device.host}: ${String(error)}`)
       }
     }
+    if (this.shuttingDown) return
     this.unregister(devicesToPrune(this.cached, configuredUuids))
   }
 
-  private async setUpDevice(device: DeviceConfig): Promise<string> {
+  private async setUpDevice(device: DeviceConfig, configuredUuids: Set<string>): Promise<string | null> {
+    if (this.shuttingDown) return null
     const makeClient = async (): Promise<PhilipsCoapClient> =>
       new PhilipsCoapClient(device.host, device.port)
-    const coordinator = new DeviceCoordinator(await makeClient(), this.log, device.host, makeClient)
+    const coordinator = new DeviceCoordinator(
+      new PhilipsCoapClient(device.host, device.port),
+      this.log,
+      device.host,
+      makeClient,
+    )
     this.coordinators.add(coordinator)
 
     try {
       await coordinator.start()
+      if (this.shuttingDown) {
+        this.discard(coordinator)
+        return null
+      }
       const status = coordinator.status
       if (!status) throw new Error('device returned no status')
 
@@ -95,6 +113,10 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
       }
 
       const accessoryUuid = this.api.hap.uuid.generate(accessoryUuidSeed(device, deviceId))
+      if (configuredUuids.has(accessoryUuid)) {
+        this.discard(coordinator)
+        return null
+      }
       const displayName = device.name
         || firstString(status, [Gen3Key.NAME, Gen2Key.NAME, Gen1Key.NAME])
         || modelId
@@ -114,10 +136,14 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
       }
       return accessoryUuid
     } catch (error) {
-      coordinator.shutdown()
-      this.coordinators.delete(coordinator)
+      this.discard(coordinator)
       throw error
     }
+  }
+
+  private discard(coordinator: DeviceCoordinator): void {
+    coordinator.shutdown()
+    this.coordinators.delete(coordinator)
   }
 
   private unregister(accessories: PlatformAccessory[]): void {
@@ -127,6 +153,7 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
   }
 
   private shutdown(): void {
+    this.shuttingDown = true
     for (const coordinator of this.coordinators) coordinator.shutdown()
     this.coordinators.clear()
   }
