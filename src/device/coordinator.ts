@@ -45,6 +45,14 @@ export class DeviceCoordinator extends EventEmitter {
     this.beginObserving()
   }
 
+  /**
+   * Arm the backoff/reconnect loop after a failed initial {@link start}, which otherwise
+   * leaves the coordinator idle because reconnection is only wired up once observing began.
+   */
+  retryStart(): void {
+    this.scheduleReconnect()
+  }
+
   ingest(status: DeviceStatus): void {
     this.armWatchdog()
     const force = this.forceNextStatus

@@ -30,6 +30,8 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
   readonly Characteristic: API['hap']['Characteristic']
   private readonly cached: PlatformAccessory[] = []
   private readonly coordinators = new Set<DeviceCoordinator>()
+  /** Accessory UUID -> owning device host, so a retrying device keeps its accessory. */
+  private readonly claimed = new Map<string, string>()
   private shuttingDown = false
 
   constructor(
@@ -59,31 +61,28 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
     const devices = parsed.data.devices
     if (devices.length === 0) {
       this.log.info('No devices configured. Add one in the Homebridge UI to get started.')
-      this.unregister(this.cached)
+      this.unregister([...this.cached])
       return
     }
 
-    const configuredUuids = new Set<string>()
     const seenHosts = new Set<string>()
     for (const device of devices) {
       if (this.shuttingDown) break
       if (seenHosts.has(device.host)) continue
       seenHosts.add(device.host)
+      // A single bad device must never take the platform down.
       try {
-        const uuid = await this.setUpDevice(device, configuredUuids)
-        if (uuid) configuredUuids.add(uuid)
+        await this.setUpDevice(device)
       } catch (error) {
-        const cached = this.cached.find(accessory => accessory.context.device?.host === device.host)
-        if (cached) configuredUuids.add(cached.UUID)
         this.log.error(`Failed to set up device at ${device.host}: ${String(error)}`)
       }
     }
     if (this.shuttingDown) return
-    this.unregister(devicesToPrune(this.cached, configuredUuids))
+    this.unregister(devicesToPrune(this.cached, new Set(this.claimed.keys())))
   }
 
-  private async setUpDevice(device: DeviceConfig, configuredUuids: Set<string>): Promise<string | null> {
-    if (this.shuttingDown) return null
+  private async setUpDevice(device: DeviceConfig): Promise<void> {
+    if (this.shuttingDown) return
     const makeClient = async (): Promise<PhilipsCoapClient> =>
       new PhilipsCoapClient(device.host, device.port)
     const coordinator = new DeviceCoordinator(
@@ -96,13 +95,32 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
 
     try {
       await coordinator.start()
+      if (!coordinator.status) throw new Error('device returned no status')
+    } catch (error) {
       if (this.shuttingDown) {
         this.discard(coordinator)
-        return null
+        return
       }
-      const status = coordinator.status
-      if (!status) throw new Error('device returned no status')
+      // CoAP NON carries no retransmission, so a first-contact failure is routine. Keep the
+      // device and let the coordinator's backoff bring it back without a Homebridge restart.
+      this.log.error(`Failed to reach device at ${device.host}: ${String(error)}; retrying`)
+      this.markOffline(device)
+      coordinator.once('status', () => this.attach(device, coordinator))
+      coordinator.retryStart()
+      return
+    }
+    this.attach(device, coordinator)
+  }
 
+  /** Wire a real accessory once the device has actually reported status. */
+  private attach(device: DeviceConfig, coordinator: DeviceCoordinator): void {
+    if (this.shuttingDown) {
+      this.discard(coordinator)
+      return
+    }
+    const status = coordinator.status
+    if (!status) return
+    try {
       const deviceId = firstString(status, [Gen1Key.DEVICE_ID, Gen3Key.SERIAL, 'device_id'])
       const modelId = firstString(status, [Gen3Key.MODEL_ID, Gen2Key.MODEL_ID, Gen1Key.MODEL_ID]) ?? ''
       const generation = detectGeneration(status)
@@ -113,9 +131,9 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
       }
 
       const accessoryUuid = this.api.hap.uuid.generate(accessoryUuidSeed(device, deviceId))
-      if (configuredUuids.has(accessoryUuid)) {
+      if (!this.claim(accessoryUuid, device.host)) {
         this.discard(coordinator)
-        return null
+        return
       }
       const displayName = device.name
         || firstString(status, [Gen3Key.NAME, Gen2Key.NAME, Gen1Key.NAME])
@@ -134,10 +152,53 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
         this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory])
         this.log.info(`Added ${displayName} (${modelId || 'unknown model'}) at ${device.host}`)
       }
-      return accessoryUuid
+      this.dropStaleClaims(device.host, accessoryUuid)
     } catch (error) {
+      this.log.error(`Failed to set up device at ${device.host}: ${String(error)}`)
       this.discard(coordinator)
-      throw error
+    }
+  }
+
+  /** Reserve a UUID for a host; false if another host already owns it. */
+  private claim(uuid: string, host: string): boolean {
+    const owner = this.claimed.get(uuid)
+    if (owner !== undefined && owner !== host) return false
+    this.claimed.set(uuid, host)
+    return true
+  }
+
+  /** Drop a placeholder accessory reserved for this host before its real device id was known. */
+  private dropStaleClaims(host: string, keep: string): void {
+    for (const [uuid, owner] of this.claimed) {
+      if (owner !== host || uuid === keep) continue
+      this.claimed.delete(uuid)
+      this.unregister(this.cached.filter(accessory => accessory.UUID === uuid))
+    }
+  }
+
+  /**
+   * A cached accessory with no handlers serves stale values and swallows writes. Surface it as
+   * "No Response" until the device answers and {@link attach} installs the real handlers.
+   */
+  private markOffline(device: DeviceConfig): void {
+    const accessory = this.cached.find(entry => entry.context.device?.host === device.host)
+    if (!accessory) return
+    this.claim(accessory.UUID, device.host)
+    const failure = (): Error => new this.api.hap.HapStatusError(
+      this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+    )
+    for (const service of accessory.services) {
+      if (service.UUID === this.Service.AccessoryInformation.UUID) continue
+      for (const characteristic of service.characteristics) {
+        if (characteristic.UUID === this.Characteristic.Name.UUID) continue
+        characteristic.onGet(() => {
+          throw failure()
+        })
+        characteristic.onSet(() => {
+          throw failure()
+        })
+        characteristic.updateValue(failure())
+      }
     }
   }
 
@@ -147,9 +208,12 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
   }
 
   private unregister(accessories: PlatformAccessory[]): void {
-    if (accessories.length > 0) {
-      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, accessories)
+    if (accessories.length === 0) return
+    for (const accessory of accessories) {
+      const index = this.cached.indexOf(accessory)
+      if (index !== -1) this.cached.splice(index, 1)
     }
+    this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, accessories)
   }
 
   private shutdown(): void {

@@ -208,22 +208,74 @@ describe('PhilipsAirPlatform', () => {
     expect(existing.displayName).toBe('Living Room')
   })
 
-  it('keeps a configured cached accessory offline while pruning a removed one', async () => {
-    const mockApi = api()
-    const platformLog = log()
-    const platform = new PhilipsAirPlatform(platformLog, config(['192.0.2.1']), mockApi)
-    const configured = cached('Offline', 'offline-id', '192.0.2.1')
-    const removed = cached('Removed', 'removed-id', '192.0.2.9')
-    platform.configureAccessory(configured)
-    platform.configureAccessory(removed)
-    fakeDevices.set('192.0.2.1', { error: new Error('offline') })
+  it('keeps a configured cached accessory retrying and unreachable while pruning a removed one', async () => {
+    vi.useFakeTimers()
+    try {
+      const mockApi = api()
+      const platformLog = log()
+      const platform = new PhilipsAirPlatform(platformLog, config(['192.0.2.1']), mockApi)
+      const configured = cached('Offline', 'offline-id', '192.0.2.1')
+      const stale = configured.addService(Service.AirPurifier, 'Offline')
+      stale.getCharacteristic(Characteristic.Active).updateValue(Characteristic.Active.ACTIVE)
+      const removed = cached('Removed', 'removed-id', '192.0.2.9')
+      platform.configureAccessory(configured)
+      platform.configureAccessory(removed)
+      fakeDevices.set('192.0.2.1', { error: new Error('offline') })
 
-    mockApi.events.get('didFinishLaunching')!()
-    await vi.waitFor(() => expect(mockApi.unregistered).toEqual([removed]))
+      mockApi.events.get('didFinishLaunching')!()
+      await vi.advanceTimersByTimeAsync(0)
 
-    expect(platformLog.error).toHaveBeenCalledWith(expect.stringContaining('offline'))
-    expect(mockApi.registered).toEqual([])
-    expect(fakeClients.get('192.0.2.1')?.close).toHaveBeenCalledOnce()
+      expect(mockApi.unregistered).toEqual([removed])
+      expect(platformLog.error).toHaveBeenCalledWith(expect.stringContaining('offline'))
+      expect(mockApi.registered).toEqual([])
+      // The device is kept and a retry is pending, so it recovers without a Homebridge restart.
+      expect(fakeClients.get('192.0.2.1')?.close).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBeGreaterThan(0)
+      // The cached accessory reports No Response instead of serving stale values.
+      const active = stale.getCharacteristic(Characteristic.Active)
+      expect(active.statusCode).toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+      await expect(active.handleGetRequest()).rejects.toBeDefined()
+      await expect(active.handleSetRequest(Characteristic.Active.INACTIVE)).rejects.toBeDefined()
+
+      // Shutdown cancels the pending retry: nothing reconnects afterwards and no timer survives.
+      mockApi.events.get('shutdown')!()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(fakeClientCreations.get('192.0.2.1')).toBe(1)
+      expect(mockApi.registered).toEqual([])
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retries a device that is offline at startup and attaches it once it appears', async () => {
+    vi.useFakeTimers()
+    try {
+      const mockApi = api()
+      fakeDevices.set('192.0.2.1', { error: new Error('offline') })
+      new PhilipsAirPlatform(log(), config(['192.0.2.1']), mockApi)
+
+      mockApi.events.get('didFinishLaunching')!()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(mockApi.registered).toEqual([])
+
+      fakeDevices.set('192.0.2.1', { status: gen3Status() })
+      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(fakeClientCreations.get('192.0.2.1')).toBe(2)
+      expect(mockApi.registered).toHaveLength(1)
+      expect(mockApi.registered[0]?.UUID).toBe(uuid.generate('stable-device-id'))
+      const purifier = mockApi.registered[0]!.getService(Service.AirPurifier)!
+      await expect(purifier.getCharacteristic(Characteristic.Active).handleGetRequest())
+        .resolves.toBe(Characteristic.Active.ACTIVE)
+
+      mockApi.events.get('shutdown')!()
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('logs once and removes cached accessories when no devices are configured', async () => {
