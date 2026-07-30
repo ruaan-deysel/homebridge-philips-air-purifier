@@ -45,6 +45,7 @@ export class PhilipsAirAccessory {
   private sleep?: HapService
   private autoPlus?: HapService
   private beep?: HapService
+  private childLock?: HapCharacteristic
   private lastManualMode = 1
 
   constructor(
@@ -74,7 +75,6 @@ export class PhilipsAirAccessory {
     const currentState = this.purifier.getCharacteristic(C.CurrentAirPurifierState)
     const targetState = this.purifier.getCharacteristic(C.TargetAirPurifierState)
     const rotationSpeed = this.purifier.getCharacteristic(C.RotationSpeed)
-    const childLock = this.purifier.getCharacteristic(C.LockPhysicalControls)
     rotationSpeed.setProps({ minStep: 100 / Math.max(1, Object.keys(model.speeds).length) })
 
     this.onGet(active, device => this.powered(device)
@@ -109,12 +109,18 @@ export class PhilipsAirAccessory {
       if (!control) throw this.communicationError()
       return this.write(control)
     })
-    this.onGet(childLock, device => booleanFromValue(device[this.childLockKey])
-      ? C.LockPhysicalControls.CONTROL_LOCK_ENABLED
-      : C.LockPhysicalControls.CONTROL_LOCK_DISABLED)
-    childLock.onSet(value => this.write({
-      [this.childLockKey]: booleanValue(value === C.LockPhysicalControls.CONTROL_LOCK_ENABLED),
-    }))
+    const childLockKey = this.childLockKey
+    if (status && childLockKey && childLockKey in status) {
+      this.childLock = this.purifier.getCharacteristic(C.LockPhysicalControls)
+      this.onGet(this.childLock, device => booleanFromValue(device[childLockKey])
+        ? C.LockPhysicalControls.CONTROL_LOCK_ENABLED
+        : C.LockPhysicalControls.CONTROL_LOCK_DISABLED)
+      this.childLock.onSet(value => this.write({
+        [childLockKey]: booleanValue(value === C.LockPhysicalControls.CONTROL_LOCK_ENABLED),
+      }))
+    } else if (this.purifier.testCharacteristic(C.LockPhysicalControls)) {
+      this.purifier.removeCharacteristic(this.purifier.getCharacteristic(C.LockPhysicalControls))
+    }
 
     const pm25 = this.airQuality.getCharacteristic(C.PM2_5Density)
     const airQuality = this.airQuality.getCharacteristic(C.AirQuality)
@@ -188,7 +194,7 @@ export class PhilipsAirAccessory {
     }
 
     const cachedSleep = accessory.getServiceById(S.Switch, 'sleep')
-    if (config.exposeSleepSwitch && this.model.presetModes.sleep) {
+    if (config.exposeSleepSwitch && this.model.presetModes.sleep && this.model.presetModes.auto) {
       this.sleep = cachedSleep ?? accessory.addService(S.Switch, 'Sleep Mode', 'sleep')
       this.purifier.addLinkedService(this.sleep)
       const on = this.sleep.getCharacteristic(C.On)
@@ -242,8 +248,11 @@ export class PhilipsAirAccessory {
     return powerValues(this.model.apiGeneration)
   }
 
-  private get childLockKey(): string {
-    return this.model.apiGeneration === ApiGeneration.Gen3 ? Gen3Key.CHILD_LOCK : Gen1Key.CHILD_LOCK
+  private get childLockKey(): string | undefined {
+    const key = this.model.apiGeneration === ApiGeneration.Gen3
+      ? Gen3Key.CHILD_LOCK
+      : this.model.apiGeneration === ApiGeneration.Gen1 ? Gen1Key.CHILD_LOCK : undefined
+    return key && this.model.switches.some(value => deviceKey(value) === key) ? key : undefined
   }
 
   private get pm25Key(): string {
@@ -278,18 +287,23 @@ export class PhilipsAirAccessory {
       : Gen1Key.FILTER_NANOPROTECT
     if (this.unavailable(this.model.unavailableFilters, unavailableKey)) return undefined
 
+    const sharedKeys: [string, string] = kind === 'pre'
+      ? [Gen1Key.FILTER_NANOPROTECT_PREFILTER, Gen1Key.FILTER_NANOPROTECT_CLEAN_TOTAL]
+      : [Gen1Key.FILTER_NANOPROTECT, Gen1Key.FILTER_NANOPROTECT_TOTAL]
     const candidates: [string, string][] = this.model.apiGeneration === ApiGeneration.Gen3
       ? [kind === 'pre'
           ? [Gen3Key.FILTER_PREFILTER, Gen3Key.FILTER_PREFILTER_TOTAL]
           : [Gen3Key.FILTER_NANOPROTECT, Gen3Key.FILTER_NANOPROTECT_TOTAL]]
+      : this.model.apiGeneration === ApiGeneration.Gen2
+        ? [sharedKeys]
       : this.model.apiGeneration === ApiGeneration.Gen1
         ? kind === 'pre'
           ? [
-              [Gen1Key.FILTER_NANOPROTECT_PREFILTER, Gen1Key.FILTER_NANOPROTECT_CLEAN_TOTAL],
+              sharedKeys,
               [Gen1Key.FILTER_PRE, Gen1Key.FILTER_PRE_TOTAL],
             ]
           : [
-              [Gen1Key.FILTER_NANOPROTECT, Gen1Key.FILTER_NANOPROTECT_TOTAL],
+              sharedKeys,
               [Gen1Key.FILTER_HEPA, Gen1Key.FILTER_HEPA_TOTAL],
             ]
         : []
@@ -424,8 +438,8 @@ export class PhilipsAirAccessory {
       this.purifier.getCharacteristic(C.RotationSpeed),
       powered ? rotationSpeedFromMode(mode, speedCount) : 0,
     )
-    this.update(
-      this.purifier.getCharacteristic(C.LockPhysicalControls),
+    if (this.childLock && this.childLockKey) this.update(
+      this.childLock,
       booleanFromValue(status[this.childLockKey])
         ? C.LockPhysicalControls.CONTROL_LOCK_ENABLED
         : C.LockPhysicalControls.CONTROL_LOCK_DISABLED,

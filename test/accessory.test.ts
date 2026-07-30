@@ -48,11 +48,11 @@ function setup(
   config: DeviceConfig = deviceConfig,
   status: DeviceStatus = capturedStatus,
   model: DeviceModelConfig = resolveModel('AC4220/12'),
+  accessory: Accessory = new Accessory('Office', uuid.generate('office')),
 ): {
   accessory: Accessory
   coordinator: FakeCoordinator
 } {
-  const accessory = new Accessory('Office', uuid.generate('office'))
   const coordinator = new FakeCoordinator(status)
   const log = Object.assign(vi.fn(), {
     debug: vi.fn(),
@@ -316,6 +316,41 @@ describe('PhilipsAirAccessory', () => {
       .resolves.toBe(75)
   })
 
+  it('exposes only the available Gen2 NanoProtect filter', async () => {
+    const { accessory } = setup(deviceConfig, {
+      'D03-02': 'ON',
+      'D03-12': 'Auto General',
+      'D03-33': 8,
+      'D05-13': 175,
+      'D05-07': 720,
+      'D05-14': 1374,
+      'D05-08': 9600,
+    }, resolveModel('AC0850/11 AWS_Philips_AIR'))
+
+    expect(accessory.getServiceById(Service.FilterMaintenance, 'pre-filter')).toBeUndefined()
+    await expect(accessory.getServiceById(Service.FilterMaintenance, 'nano-protect')!
+      .getCharacteristic(Characteristic.FilterLifeLevel).handleGetRequest()).resolves.toBe(14)
+  })
+
+  it('removes unsupported Gen2 child lock and never writes cl', async () => {
+    const cached = new Accessory('Office', uuid.generate('gen2-child-lock'))
+    cached.getService(Service.AccessoryInformation)
+    cached.addService(Service.AirPurifier, 'Office')
+      .getCharacteristic(Characteristic.LockPhysicalControls)
+    const { accessory, coordinator } = setup(deviceConfig, {
+      'D03-02': 'ON',
+      'D03-12': 'Auto General',
+      'D03-33': 8,
+    }, resolveModel('AC1715'), cached)
+    const purifier = accessory.getService(Service.AirPurifier)!
+
+    expect(purifier.testCharacteristic(Characteristic.LockPhysicalControls)).toBe(false)
+    await purifier.getCharacteristic(Characteristic.LockPhysicalControls).handleSetRequest(
+      Characteristic.LockPhysicalControls.CONTROL_LOCK_ENABLED,
+    )
+    expect(coordinator.setControl).not.toHaveBeenCalled()
+  })
+
   it('maps non-ladder Gen3 mode values by ordered model speed writes', async () => {
     const { accessory } = setup(deviceConfig, {
       [Gen3Key.POWER]: 1,
@@ -345,17 +380,16 @@ describe('PhilipsAirAccessory', () => {
     expect(coordinator.setControl).not.toHaveBeenCalled()
   })
 
-  it('rejects Sleep off when the model has no Auto preset', async () => {
-    const base = resolveModel('AC4220/12')
-    const model = {
-      ...base,
-      presetModes: { sleep: base.presetModes.sleep! },
-    }
-    const { accessory, coordinator } = setup(deviceConfig, capturedStatus, model)
+  it('removes cached Sleep when the model has no Auto preset', () => {
+    const cached = new Accessory('Office', uuid.generate('no-auto'))
+    cached.addService(Service.Switch, 'Sleep Mode', 'sleep')
+    const { accessory } = setup(deviceConfig, {
+      pwr: '1',
+      mode: 'M',
+      om: 's',
+      pm25: 8,
+    }, resolveModel('AC5659'), cached)
 
-    await expect(accessory.getServiceById(Service.Switch, 'sleep')!
-      .getCharacteristic(Characteristic.On).handleSetRequest(false))
-      .rejects.toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
-    expect(coordinator.setControl).not.toHaveBeenCalled()
+    expect(accessory.getServiceById(Service.Switch, 'sleep')).toBeUndefined()
   })
 })
