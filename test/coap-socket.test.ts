@@ -185,7 +185,11 @@ describe('CoapSocket.observe', () => {
     expect(socket.pendingCount).toBe(0)
   })
 
-  it.each(['synchronous', 'asynchronous'] as const)('reports %s cancellation send failures', async (mode) => {
+  it.each([
+    ['synchronous', false],
+    ['asynchronous', false],
+    ['asynchronous after close', true],
+  ] as const)('handles %s cancellation send failures', async (mode, closeBeforeError) => {
     device = fakeDevice((request, reply) => {
       reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token })
     })
@@ -200,16 +204,19 @@ describe('CoapSocket.observe', () => {
     })
 
     const underlying = (socket as unknown as { socket: { send: (...args: unknown[]) => void } }).socket
+    let sendCallback: ((error: Error) => void) | undefined
     underlying.send = (...args) => {
       const error = new Error(`${mode} send failure`)
       if (mode === 'synchronous') throw error
       const callback = args.at(-1)
-      if (typeof callback === 'function') callback(error)
+      if (typeof callback === 'function') sendCallback = callback
     }
 
     observation.cancel()
+    if (closeBeforeError) socket.close()
+    sendCallback?.(new Error(`${mode} send failure`))
 
-    expect(errors.map(error => error.message)).toEqual([`${mode} send failure`])
+    expect(errors.map(error => error.message)).toEqual(closeBeforeError ? [] : [`${mode} send failure`])
     expect(socket.pendingCount).toBe(0)
   })
 

@@ -111,7 +111,7 @@ export class CoapSocket {
       const key = token.toString('hex')
       const pending = this.pending.get(key)
       if (!pending) {
-        onError?.(error)
+        if (!this.closed) onError?.(error)
         return
       }
       clearTimeout(pending.timer)
