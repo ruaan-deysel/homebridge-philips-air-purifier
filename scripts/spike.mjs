@@ -13,7 +13,8 @@ function cipherParts(key) {
   return [Buffer.from(kv.slice(0, 16), 'ascii'), Buffer.from(kv.slice(16), 'ascii')]
 }
 function nextKey(key) {
-  const n = (parseInt(key, 16) + 1) & 0xFFFFFFFF
+  // >>> 0, not & 0xFFFFFFFF — JS & is signed 32-bit and breaks above 0x7FFFFFFF.
+  const n = (parseInt(key, 16) + 1) >>> 0
   return n.toString(16).padStart(8, '0').toUpperCase()
 }
 function encrypt(key, payload) {

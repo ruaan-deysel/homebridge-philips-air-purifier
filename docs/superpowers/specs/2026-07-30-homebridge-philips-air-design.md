@@ -212,15 +212,49 @@ AirPurifier "Office 1"                    primary
   CurrentAirPurifierState    derived from D03102 + D0310C
   TargetAirPurifierState     AUTO → D0310C=0 · MANUAL → last manual speed
   RotationSpeed              minStep 20 → 20/40/60/80/100 = D0310C 1…5
-  LockPhysicalControls       D03103
+  LockPhysicalControls       D03103            boolean 0/1
 AirQualitySensor             D03221 → PM2_5Density and derived AirQuality
 FilterMaintenance (pre)      D0520D / D05207  → FilterLifeLevel
 FilterMaintenance (HEPA)     D0540E / D05408  → FilterLifeLevel
 TemperatureSensor            D03224 ÷ 10
 HumiditySensor               D03125
-Lightbulb                    D03105  display backlight
-Switch (opt-in, default off) Sleep D0310C=17 · Medium 19 · Turbo 18
+Lightbulb                    D03135  lamp mode — On = 1, Off = 0
+                                     Brightness snaps 50 → 1, 100 → 2
+Switch (opt-in, default off) Sleep  D0310C = 17
+Switch (opt-in, default off) Auto+ AI  D03180
+Switch (opt-in, default off) Beep   D03130 — On writes 100, not 1
 ```
+
+### Key domains verified on hardware
+
+Every write below was probed on the real AC4220/12 and the original value
+restored. Two of these contradict the HA registry and would have shipped broken.
+
+| Key | Probed | Result | Conclusion |
+|---|---|---|---|
+| `D03130` | 0, 50, 1, 100 | reads back 0, 100, 100, 100 | Boolean stored as **0 / 100**. Writing `1` reads back `100`, so a switch that echoes its written value would appear stuck off. **On must write 100.** |
+| `D03105` | 1, 2, 3 | ACKed, always reads back 0 | **Read-only status mirror.** Goes to `101` when the lamp is on. The HA registry maps `D03105#1` as the light entity; on this firmware that is a dead control. |
+| `D03135` | 1, 2, 3, 0 | 1, 2, 2, 0 — and `D03105` follows to 101 | **The real light control.** Domain `{0, 1, 2}`; 3 clamps to 2. |
+| `D0310C` | 1, 2, 3, 4, 5 | `D0310D` = 1, 2, 3, 4, **18** | **Speed 5 is Turbo.** Mode 18 and mode 5 are the same physical state. |
+| `D0310C` | 17, 19, 0 | `D0310D` = 1, 3, 1 | Sleep ≡ speed 1, Medium ≡ speed 3, Auto ≡ speed 1 |
+| `D03103` | 1, 0 | 1, 0 | Boolean, as expected |
+| `D03137` | 0 | reads back 1 | **Not writable.** Not exposed. |
+| `D0313B` | 50, 100, 20 | 50, 100, 20 | Freely writable, semantics unknown. Not exposed. |
+
+Consequences for the switch list:
+
+- **Turbo is dropped.** `D0310C = 18` is the same state as speed 5, which is
+  already `RotationSpeed = 100`. A Turbo switch would be a duplicate control that
+  fights the slider.
+- **Medium is dropped.** `D0310C = 19` reports the same fan speed as speed 3
+  (`RotationSpeed = 60`).
+- **Sleep is kept.** It reports speed 1 but is a distinct device mode, so it is
+  not assumed equivalent to `RotationSpeed = 20`.
+
+Because writes are ACKed even when ignored, `status === "success"` from
+`/sys/dev/control` means "command accepted", **not** "value applied". Only the
+observe stream confirms a real change. This is why writes are never applied
+optimistically.
 
 Switches are off by default so the default Home app tile stays uncluttered.
 
@@ -272,11 +306,22 @@ Verified live state from the test device, for reference:
 | `D03240` | 0 | no error |
 | `D01S12` | `"0.2.3"` | firmware — use this, not `swversion` from `/sys/dev/info`, which reports `"0.0.0"` |
 
-### Open question to resolve during implementation
+### Porting hazard: signed 32-bit AND
 
-`D03130` is `NEW2_BEEP` in the HA registry and is treated there as a switch, but
-this firmware reports **`100`**, not a boolean. Its real domain must be
-established on hardware before it is mapped. Until then it is not exposed.
+The client-key increment is `(int(key, 16) + 1) & 0xFFFFFFFF` in Python, which is
+unsigned. JavaScript's `&` is **signed** 32-bit, so the direct transliteration is
+wrong above `0x7FFFFFFF`:
+
+| key | Python | JS `& 0xFFFFFFFF` | JS `>>> 0` |
+|---|---|---|---|
+| `7FFFFFFF` | `80000000` | `-80000000` ✗ | `80000000` ✓ |
+| `80000000` | `80000001` | `-7FFFFFFF` ✗ | `80000001` ✓ |
+| `FFFFFFFF` | `00000000` | `00000000` ✓ | `00000000` ✓ |
+
+`nextKey` must use `>>> 0`. Sync keys are random, so roughly half of all sessions
+would eventually cross the boundary and silently corrupt every subsequent control
+write — an intermittent failure that only appears after a device has been running
+a while. This has a mandatory regression test.
 
 ## Configuration
 
@@ -357,7 +402,9 @@ opinion, per the author's standing workflow.
 | `HumidifierDehumidifier` service | AC2729 / HU / CX models not owned | a humidifier model needs support |
 | `HeaterCooler` service | AMF765 / AMF870 / CX heater models not owned | a heater model needs support |
 | Oscillation / `SwingMode` | AMF models only | as above |
-| `D03130` beep | real value domain unknown (reports `100`, not boolean) | verified on hardware |
+| Turbo and Medium switches | verified redundant — Turbo ≡ speed 5 ≡ 100 %, Medium ≡ speed 3 | never, unless a model is found where they differ |
+| Allergen index (`D03120`) | no HomeKit characteristic exists for it | a custom characteristic is wanted for Eve |
+| `D03137`, `D0313B` | `D03137` is not writable; `D0313B` semantics unknown | their meaning is established |
 | Matter export | Homebridge 2 supports it, but HAP is the requirement | HAP path is stable and Matter is asked for |
 
 ## Security notes
