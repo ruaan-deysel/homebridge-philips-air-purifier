@@ -104,6 +104,28 @@ describe('CoapSocket.request', () => {
     await rejection
     expect(socket.pendingCount).toBe(0)
   })
+
+  it('rejects an async send failure without notifying live observations', async () => {
+    device = fakeDevice((request, reply) => {
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    const observerErrors: Error[] = []
+    await socket.observe({ path: '/status', onNotify: () => {}, onError: error => observerErrors.push(error) })
+
+    const underlying = (socket as unknown as { socket: { send: (...args: unknown[]) => void } }).socket
+    underlying.send = (...args) => {
+      const callback = args.at(-1)
+      if (typeof callback === 'function') callback(new Error('ENOTFOUND'))
+    }
+
+    await expect(socket.request({ method: 'GET', path: '/info', timeoutMs: 100 }))
+      .rejects.toThrow('ENOTFOUND')
+    expect(observerErrors).toEqual([])
+    expect(socket.pendingCount).toBe(1)
+  })
 })
 
 describe('CoapSocket.observe', () => {

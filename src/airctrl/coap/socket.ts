@@ -105,7 +105,16 @@ export class CoapSocket {
       token,
       options,
       payload: payload === undefined ? undefined : Buffer.from(payload as string),
-    }), this.port, this.host)
+    }), this.port, this.host, error => {
+      if (!error) return
+      const key = token.toString('hex')
+      const pending = this.pending.get(key)
+      if (!pending) return
+      clearTimeout(pending.timer)
+      this.handlers.delete(key)
+      this.pending.delete(key)
+      pending.reject(error)
+    })
   }
 
   /** One request, one response. */
