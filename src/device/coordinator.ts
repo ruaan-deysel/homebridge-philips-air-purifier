@@ -58,10 +58,10 @@ export class DeviceCoordinator extends EventEmitter {
     this.emit('status', status)
   }
 
-  markAvailable(): void {
+  markAvailable(message = `${this.host} available`): void {
     if (this.isAvailable) return
     this.isAvailable = true
-    this.log.info(`${this.host} available`)
+    this.log.info(message)
     this.emit('availability', true)
   }
 
@@ -128,7 +128,11 @@ export class DeviceCoordinator extends EventEmitter {
           }
           if (abort.signal.aborted || this.shuttingDown) return
           const status = result.value
-          this.markAvailable()
+          const recovered = this.reconnectTimer !== null
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+          this.reconnectTimer = null
+          if (recovered) this.resetBackoff()
+          this.markAvailable(recovered ? `${this.host} Reconnected` : undefined)
           this.ingest(status)
         }
       } catch (error) {
@@ -215,11 +219,10 @@ export class DeviceCoordinator extends EventEmitter {
       const { status, maxAge } = await replacement.getStatus()
       if (this.shuttingDown) return
       this.maxAgeS = maxAge
-      this.markAvailable()
+      this.markAvailable(`${this.host} Reconnected`)
       this.ingest(status)
       this.resetBackoff()
       this.beginObserving()
-      this.log.info(`${this.host} Reconnected`)
     } catch (error) {
       if (replacement && this.client === replacement) this.closeCurrentClient()
       else replacement?.close()
