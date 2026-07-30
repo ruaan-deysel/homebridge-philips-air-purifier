@@ -105,6 +105,9 @@ describe('decode', () => {
     expect(() => decode(Buffer.alloc(3))).toThrow(/4 bytes/)
     expect(() => decode(Buffer.from([0x00, 0x01, 0x00, 0x01]))).toThrow(/version/) // version 0
     expect(() => decode(Buffer.from([0x4F, 0x01, 0x00, 0x01]))).toThrow(/token length/) // TKL 15
+    expect(() => decode(Buffer.from('44010001deadbe', 'hex'))).toThrow(/truncated/) // token
+    expect(() => decode(Buffer.from('54450001deadbeefd0', 'hex'))).toThrow(/truncated/) // option extension
+    expect(() => decode(Buffer.from('400100011361', 'hex'))).toThrow(/truncated/) // option value
     expect(() => decode(Buffer.from([0x40, 0x01, 0x00, 0x01, 0xF0]))).toThrow(/reserved/) // nibble 15
   })
 

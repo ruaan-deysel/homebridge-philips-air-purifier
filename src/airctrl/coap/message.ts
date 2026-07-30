@@ -122,22 +122,21 @@ export function decode(buffer: Buffer): DecodedCoapMessage {
   const messageId = buffer.readUInt16BE(2)
 
   let offset = 4
+  if (offset + tokenLength > buffer.length) throw new Error('truncated CoAP token')
   const token = buffer.subarray(offset, offset + tokenLength)
   offset += tokenLength
 
-  // A truncated datagram can push `offset` past `buffer.length`: reads then
-  // return `undefined`, which propagates as NaN through length/delta math and
-  // yields a bogus-but-non-throwing option (or an empty subarray). Left
-  // unguarded deliberately: UDP delivery is all-or-nothing so this can only
-  // happen to a genuinely malformed packet, and a NaN/garbage token cannot
-  // match any pending handler's hex key, so the message is inert either way.
   const options: CoapOptionEntry[] = []
   let number = 0
   while (offset < buffer.length && buffer[offset] !== PAYLOAD_MARKER) {
     const byte = buffer[offset++]!
     const readExtension = (nibble: number): number => {
-      if (nibble === 13) return buffer[offset++]! + 13
+      if (nibble === 13) {
+        if (offset >= buffer.length) throw new Error('truncated CoAP option extension')
+        return buffer[offset++]! + 13
+      }
       if (nibble === 14) {
+        if (offset + 2 > buffer.length) throw new Error('truncated CoAP option extension')
         const value = buffer.readUInt16BE(offset) + 269
         offset += 2
         return value
@@ -148,6 +147,7 @@ export function decode(buffer: Buffer): DecodedCoapMessage {
     const delta = readExtension(byte >> 4)
     const length = readExtension(byte & 0x0F)
     number += delta
+    if (offset + length > buffer.length) throw new Error('truncated CoAP option value')
     options.push({ number, value: buffer.subarray(offset, offset + length) })
     offset += length
   }
