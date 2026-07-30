@@ -165,29 +165,16 @@ describe('PhilipsCoapClient', () => {
   })
 
   it('returns false when a required resync fails and sends no later control write', async () => {
-    let syncCount = 0
-    let resyncStarted!: () => void
-    const resyncRequest = new Promise<void>(resolve => {
-      resyncStarted = resolve
-    })
     const { device, client } = await start(request => {
-      if (pathOf(request) === '/sys/dev/sync') {
-        syncCount++
-        if (syncCount === 1) return { payload: '0DC377BA' }
-        resyncStarted()
-        return undefined
-      }
+      if (pathOf(request) === '/sys/dev/sync') return { payload: '0DC377BA' }
       if (pathOf(request) === '/sys/dev/control') return { payload: JSON.stringify({ status: 'failed' }) }
     })
     await client.connect()
+    const connect = vi.spyOn(client, 'connect').mockRejectedValueOnce(new Error('sync failed'))
 
-    const result = client.setControl({ D03102: 1 }, { retries: 2, retryDelayMs: 1 })
-    await resyncRequest
-    client.close()
-
-    await expect(result).resolves.toBe(false)
+    await expect(client.setControl({ D03102: 1 }, { retries: 2, retryDelayMs: 1 })).resolves.toBe(false)
     expect(device.requests.filter(request => pathOf(request) === '/sys/dev/control')).toHaveLength(1)
-    expect(device.requests.filter(request => pathOf(request) === '/sys/dev/sync')).toHaveLength(2)
+    expect(connect).toHaveBeenCalledOnce()
   })
 
   it('increments the rolling key before every control attempt', async () => {
@@ -210,6 +197,26 @@ describe('PhilipsCoapClient', () => {
     const { client } = await start(() => undefined)
     await expect(client.getStatus()).rejects.toThrow(NotConnectedError)
     await expect(client.setControl({ D03102: 1 })).rejects.toThrow(/connect\(\)/)
+  })
+
+  it('rejects every public operation once close starts', async () => {
+    const { device, client } = await start(request => {
+      if (pathOf(request) === '/sys/dev/sync') return { payload: '0DC377BA' }
+    })
+    await client.connect()
+    client.close()
+
+    const operations = [
+      () => client.getInfo(),
+      () => client.connect(),
+      () => client.getStatus(),
+      () => client.observe().next(),
+      () => client.setControl({ D03102: 1 }),
+    ]
+    for (const operation of operations) {
+      await expect(operation()).rejects.toThrow(/client closed/)
+    }
+    expect(device.requests.map(pathOf)).toEqual(['/sys/dev/sync'])
   })
 
   it.each(['getStatus', 'observe'] as const)(
@@ -260,8 +267,57 @@ describe('PhilipsCoapClient', () => {
     },
   )
 
+  it.each(['getInfo', 'connect', 'setControl'] as const)(
+    'rejects %s when its request resolves after close',
+    async operation => {
+      const { client } = await start(request => {
+        if (pathOf(request) === '/sys/dev/sync') return { payload: '0DC377BA' }
+      })
+      if (operation === 'setControl') await client.connect()
+
+      let requestStarted!: () => void
+      const started = new Promise<void>(resolve => {
+        requestStarted = resolve
+      })
+      let resolveRequest!: (response: Awaited<ReturnType<CoapSocket['request']>>) => void
+      const delayedRequest = new Promise<Awaited<ReturnType<CoapSocket['request']>>>(resolve => {
+        resolveRequest = resolve
+      })
+      const socket = (client as unknown as { socket: CoapSocket }).socket
+      vi.spyOn(socket, 'request').mockImplementation(() => {
+        requestStarted()
+        return delayedRequest
+      })
+      const result = operation === 'getInfo'
+        ? client.getInfo()
+        : operation === 'connect'
+          ? client.connect()
+          : client.setControl({ D03102: 1 })
+      await started
+
+      client.close()
+      resolveRequest({
+        type: 1,
+        code: 69,
+        messageId: 1,
+        token: Buffer.from('01020304', 'hex'),
+        options: [],
+        payload: Buffer.from(operation === 'getInfo'
+          ? JSON.stringify({ modelid: 'AC4220/12' })
+          : operation === 'connect'
+            ? '0DC377BA'
+            : JSON.stringify({ status: 'success' })),
+      })
+
+      await expect(result).rejects.toThrow(/client closed/)
+      if (operation === 'connect') {
+        expect((client as unknown as { clientKey?: string }).clientKey).toBeUndefined()
+      }
+    },
+  )
+
   it('cancels every live observation when closed', async () => {
-    const { client } = await start(request => {
+    const { device, client } = await start(request => {
       if (pathOf(request) === '/sys/dev/sync') return { payload: '0DC377BA' }
       if (pathOf(request) === '/sys/dev/status') {
         return {
@@ -281,6 +337,7 @@ describe('PhilipsCoapClient', () => {
       pending,
       new Promise((_, reject) => setTimeout(() => reject(new Error('iterator did not settle')), 100)),
     ])).rejects.toThrow(/client closed/)
+    await waitFor(() => device.requests.filter(request => observeValue(request) === 1).length === 2)
     await second.return(undefined)
   })
 })

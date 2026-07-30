@@ -40,14 +40,28 @@ export class PhilipsCoapClient {
   }
 
   async getInfo(): Promise<DeviceInfo> {
-    const response = await this.socket.request({ method: 'GET', path: INFO_PATH })
-    return DeviceInfoSchema.parse(JSON.parse(response.payload.toString()))
+    this.requireOpen()
+    try {
+      const response = await this.socket.request({ method: 'GET', path: INFO_PATH })
+      this.requireOpen()
+      return DeviceInfoSchema.parse(JSON.parse(response.payload.toString()))
+    } catch (error) {
+      this.requireOpen()
+      throw error
+    }
   }
 
   async connect(): Promise<void> {
+    this.requireOpen()
     const nonce = randomBytes(4).toString('hex').toUpperCase()
-    const response = await this.socket.request({ method: 'POST', path: SYNC_PATH, payload: nonce })
-    this.clientKey = response.payload.toString().trim()
+    try {
+      const response = await this.socket.request({ method: 'POST', path: SYNC_PATH, payload: nonce })
+      this.requireOpen()
+      this.clientKey = response.payload.toString().trim()
+    } catch (error) {
+      this.requireOpen()
+      throw error
+    }
   }
 
   private requireKey(): string {
@@ -64,6 +78,7 @@ export class PhilipsCoapClient {
   }
 
   async getStatus(): Promise<{ status: DeviceStatus, maxAge: number }> {
+    this.requireOpen()
     this.requireKey()
     let observation: Observation | undefined
     try {
@@ -84,6 +99,7 @@ export class PhilipsCoapClient {
   }
 
   async *observe(): AsyncGenerator<DeviceStatus> {
+    this.requireOpen()
     this.requireKey()
     const queue: DeviceStatus[] = []
     let failure: Error | undefined
@@ -147,6 +163,7 @@ export class PhilipsCoapClient {
     values: Record<string, unknown>,
     options: SetControlOptions = {},
   ): Promise<boolean> {
+    this.requireOpen()
     const { retries = 5, retryDelayMs = 500, resync = true } = options
     this.requireKey()
     const payload = JSON.stringify({
@@ -161,6 +178,7 @@ export class PhilipsCoapClient {
     })
 
     for (let attempt = 0; attempt <= retries; attempt++) {
+      this.requireOpen()
       try {
         this.clientKey = nextKey(this.requireKey())
         const response = await this.socket.request({
@@ -168,8 +186,10 @@ export class PhilipsCoapClient {
           path: CONTROL_PATH,
           payload: encrypt(this.clientKey, payload),
         })
+        this.requireOpen()
         if (JSON.parse(response.payload.toString()).status === 'success') return true
       } catch {
+        this.requireOpen()
         // A timeout, malformed response, or rejected write is retryable.
       }
 
@@ -178,6 +198,7 @@ export class PhilipsCoapClient {
         try {
           await this.connect()
         } catch {
+          this.requireOpen()
           return false
         }
       }
@@ -196,6 +217,6 @@ export class PhilipsCoapClient {
     }
     this.observations.clear()
     this.observationFailures.clear()
-    this.socket.close()
+    setImmediate(() => this.socket.close())
   }
 }
