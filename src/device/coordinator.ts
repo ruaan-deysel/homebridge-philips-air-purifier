@@ -14,6 +14,7 @@ export class DeviceCoordinator extends EventEmitter {
   private observeIterator: AsyncIterator<DeviceStatus> | null = null
   private clientClosed = false
   private shuttingDown = false
+  private forceNextStatus = false
 
   constructor(
     private client: PhilipsCoapClient,
@@ -46,7 +47,9 @@ export class DeviceCoordinator extends EventEmitter {
 
   ingest(status: DeviceStatus): void {
     this.armWatchdog()
-    if (this.lastStatus) {
+    const force = this.forceNextStatus
+    this.forceNextStatus = false
+    if (!force && this.lastStatus) {
       const keys = new Set([...Object.keys(this.lastStatus), ...Object.keys(status)])
       if ([...keys].every(key =>
         Object.hasOwn(this.lastStatus!, key)
@@ -61,6 +64,7 @@ export class DeviceCoordinator extends EventEmitter {
   markAvailable(message = `${this.host} available`): void {
     if (this.isAvailable) return
     this.isAvailable = true
+    this.forceNextStatus = this.lastStatus !== null
     this.log.info(message)
     this.emit('availability', true)
   }

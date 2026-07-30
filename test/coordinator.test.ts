@@ -191,6 +191,32 @@ describe('DeviceCoordinator', () => {
     coordinator.shutdown()
   })
 
+  it('emits an unchanged first status after reconnect, then resumes duplicate suppression', async () => {
+    vi.useFakeTimers()
+    const status = { pwr: '1', pm25: 8 }
+    const first = controlledClient(status, 2)
+    const replacement = controlledClient(status, 2)
+    const coordinator = new DeviceCoordinator(
+      first,
+      logging(),
+      '192.0.2.1',
+      vi.fn().mockResolvedValue(replacement),
+    )
+    const statuses: Record<string, unknown>[] = []
+    coordinator.on('status', value => statuses.push(value))
+
+    await coordinator.start()
+    await vi.advanceTimersByTimeAsync(11_000)
+    await flush()
+
+    expect(statuses).toEqual([status, status])
+
+    replacement.push(status)
+    await flush()
+    expect(statuses).toEqual([status, status])
+    coordinator.shutdown()
+  })
+
   it('cancels a pending reconnect when the current stream recovers', async () => {
     vi.useFakeTimers()
     const device = controlledClient({ pwr: '1' }, 2)

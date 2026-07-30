@@ -202,7 +202,7 @@ describe('PhilipsAirAccessory', () => {
     expect(update).toHaveBeenCalledWith(40)
   })
 
-  it('waits for a fresh status event after availability recovers', () => {
+  it('waits for a fresh status event and clears No Response even when status is unchanged', () => {
     const { accessory, coordinator } = setup()
     const speed = accessory.getService(Service.AirPurifier)!
       .getCharacteristic(Characteristic.RotationSpeed)
@@ -210,14 +210,14 @@ describe('PhilipsAirAccessory', () => {
 
     coordinator.setAvailable(false)
     update.mockClear()
-    coordinator.status = { ...coordinator.status, [Gen3Key.MODE_B]: 4 }
     coordinator.setAvailable(true)
 
     expect(update).not.toHaveBeenCalled()
 
-    coordinator.publish({ [Gen3Key.MODE_B]: 2 })
+    coordinator.publish({})
     expect(update).toHaveBeenCalledOnce()
-    expect(update).toHaveBeenCalledWith(40)
+    expect(update).toHaveBeenCalledWith(0)
+    expect(speed.statusCode).toBe(HAPStatus.SUCCESS)
   })
 
   it('removes disabled optional services restored from cache', () => {
