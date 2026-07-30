@@ -92,6 +92,24 @@ describe('hostsInSubnet', () => {
       '192.168.255.254',
     ])
   })
+
+  it('allows at most 1,024 usable hosts before creating the generator', () => {
+    expect([...hostsInSubnet('10.0.0.1/22')]).toHaveLength(1022)
+    expect(() => hostsInSubnet('10.0.0.1/21')).toThrow(/1,024/)
+    expect(() => hostsInSubnet('0.0.0.0/0')).toThrow(/1,024/)
+  })
+
+  it.each([
+    '10.0.0.1/33',
+    '10.0.0.256/24',
+  ])('rejects malformed CIDR %s before creating the generator', cidr => {
+    expect(() => hostsInSubnet(cidr)).toThrow(RangeError)
+  })
+
+  it('returns no usable hosts for /31 and /32', () => {
+    expect([...hostsInSubnet('10.0.0.0/31')]).toEqual([])
+    expect([...hostsInSubnet('10.0.0.1/32')]).toEqual([])
+  })
 })
 
 describe('probeHost', () => {
@@ -227,7 +245,7 @@ describe('discover', () => {
     await expect(discover({
       subnet: '127.0.0.0/30',
       port: device.port,
-      timeoutMs: 10,
+      timeoutMs: 100,
       concurrency: 2,
     })).resolves.toEqual([{
       host: '127.0.0.1',

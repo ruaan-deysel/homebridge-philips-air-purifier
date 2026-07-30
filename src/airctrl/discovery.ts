@@ -1,6 +1,8 @@
 import { networkInterfaces } from 'node:os'
 import { PhilipsCoapClient } from './client.js'
 
+const MAX_USABLE_HOSTS = 1024
+
 export interface DiscoveredDevice {
   host: string
   model: string
@@ -18,7 +20,12 @@ export interface DiscoverOptions {
 }
 
 function ipv4ToInt(address: string): number {
-  return address.split('.').reduce((value, octet) => ((value << 8) | Number(octet)) >>> 0, 0)
+  const octets = address.split('.')
+  if (
+    octets.length !== 4
+    || octets.some(octet => !/^\d+$/.test(octet) || Number(octet) > 255)
+  ) throw new RangeError(`invalid IPv4 address: ${address}`)
+  return octets.reduce((value, octet) => ((value << 8) | Number(octet)) >>> 0, 0)
 }
 
 function intToIpv4(value: number): string {
@@ -31,8 +38,15 @@ function intToIpv4(value: number): string {
 }
 
 function subnet(cidr: string): { network: number, broadcast: number, prefix: number } {
-  const [address, prefixText] = cidr.split('/')
+  const parts = cidr.split('/')
+  if (parts.length !== 2 || !/^\d+$/.test(parts[1]!)) {
+    throw new RangeError(`invalid IPv4 CIDR: ${cidr}`)
+  }
+  const [address, prefixText] = parts
   const prefix = Number(prefixText)
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
+    throw new RangeError(`invalid IPv4 CIDR: ${cidr}`)
+  }
   const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0
   const network = (ipv4ToInt(address!) & mask) >>> 0
   return { network, broadcast: (network | ~mask) >>> 0, prefix }
@@ -55,9 +69,15 @@ export function localSubnets(): string[] {
   return [...cidrs]
 }
 
-export function* hostsInSubnet(cidr: string): Generator<string> {
+export function hostsInSubnet(cidr: string): Generator<string> {
   const { network, broadcast } = subnet(cidr)
-  for (let host = network + 1; host < broadcast; host++) yield intToIpv4(host)
+  const usableHosts = Math.max(0, broadcast - network - 1)
+  if (usableHosts > MAX_USABLE_HOSTS) {
+    throw new RangeError(`subnet ${cidr} exceeds the maximum of 1,024 usable hosts`)
+  }
+  return (function* () {
+    for (let host = network + 1; host < broadcast; host++) yield intToIpv4(host)
+  })()
 }
 
 export async function probeHost(
