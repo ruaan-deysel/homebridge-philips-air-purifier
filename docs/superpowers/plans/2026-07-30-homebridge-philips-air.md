@@ -36,7 +36,8 @@
 **Reference material** (read before starting, all verified against hardware):
 - `docs/superpowers/specs/2026-07-30-homebridge-philips-air-design.md` — the design
 - `test/fixtures/ac4220-12-status.json` — real 59-key device payload
-- `scripts/spike.mjs`, `scripts/explore.mjs`, `scripts/explore2.mjs` — working probes
+- `scripts/README.md` — what each probe script is and how to run it
+- `scripts/explore.mjs`, `scripts/explore2.mjs` — the probes that produced the hardware findings. They predate the `coap` dependency being dropped and need a throwaway `npm i -D coap` to run again; their findings are already in the spec.
 - `scripts/coap-spike.mjs` — **the working reference implementation of Tasks 2 and 4.** Contains a passing RFC 7252 codec, a `node:dgram` transport with token matching, and verified observe registration and cancellation against the real device. Port from this rather than writing from scratch.
 - Python source to port: clone `https://github.com/ruaan-deysel/philips-airctrl` and `https://github.com/ruaan-deysel/ha-philips-airpurifier`
 
@@ -111,6 +112,8 @@
   "devDependencies": {
     "@eslint/js": "^9.0.0",
     "@types/node": "^24.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^9.0.0",
     "homebridge": "^2.2.1",
     "typescript": "^5.6.0",
@@ -157,22 +160,36 @@ export default defineConfig({
 })
 ```
 
+`js.configs.recommended` alone cannot parse TypeScript — type annotations are
+syntax errors to the default parser — so the TS parser and its `no-unused-vars`
+replacement are both required. The base rule must be switched off, or it
+double-reports on type-only references.
+
 ```javascript
 // eslint.config.js
 import js from '@eslint/js'
+import tsPlugin from '@typescript-eslint/eslint-plugin'
+import tsParser from '@typescript-eslint/parser'
 
 export default [
   js.configs.recommended,
   {
     files: ['**/*.ts'],
     languageOptions: {
+      parser: tsParser,
       ecmaVersion: 2022,
       sourceType: 'module',
     },
+    plugins: {
+      '@typescript-eslint': tsPlugin,
+    },
     rules: {
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      // The base rule cannot see type-only usages; the TS-aware one replaces it.
+      'no-unused-vars': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
     },
   },
+  // scripts/ holds standalone hardware probes, outside the build and the suite.
   { ignores: ['dist/**', 'node_modules/**', 'scripts/**'] },
 ]
 ```
@@ -400,10 +417,12 @@ Expected: PASS, 8 assertions across 5 test blocks.
 This proves the port matches the device, not just itself.
 
 ```bash
-node scripts/spike.mjs 192.168.20.151
+node scripts/coap-spike.mjs 192.168.20.151
 ```
 
-Expected: `[3] decrypt OK, keys = 59` — a digest mismatch would throw instead.
+Expected: `[4] decrypted 59 keys | model AC4220/12` — a digest mismatch throws
+instead. This script is dependency-free (it carries its own CoAP codec), so it
+runs before Task 2 exists.
 
 - [ ] **Step 6: Commit**
 
@@ -3932,7 +3951,7 @@ Open `http://192.168.20.21:8581`, go to Accessories, and compare against the
 device's own panel and against a direct read:
 
 ```bash
-node scripts/spike.mjs 192.168.20.151 | grep -E 'full:|power|model'
+node scripts/coap-spike.mjs 192.168.20.151 | grep -E 'power:|prefilter:|decrypted'
 ```
 
 Check temperature (`D03224 ÷ 10`), humidity (`D03125`), PM2.5 (`D03221`),

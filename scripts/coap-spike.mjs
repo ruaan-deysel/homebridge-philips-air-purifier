@@ -244,6 +244,14 @@ const decrypt = blob => {
   const d = crypto.createDecipheriv('aes-128-cbc', k, iv)
   return Buffer.concat([d.update(Buffer.from(blob.slice(8, -64), 'hex')), d.final()]).toString('utf8')
 }
+const encrypt = (key, payload) => {
+  const [k, iv] = parts(key)
+  const c = crypto.createCipheriv('aes-128-cbc', k, iv)
+  const ct = Buffer.concat([c.update(payload, 'utf8'), c.final()]).toString('hex').toUpperCase()
+  return key + ct + crypto.createHash('sha256').update(key + ct).digest('hex').toUpperCase()
+}
+// >>> 0, not & 0xFFFFFFFF — JS & is signed 32-bit and breaks above 0x7FFFFFFF.
+const nextKey = k => ((parseInt(k, 16) + 1) >>> 0).toString(16).padStart(8, '0').toUpperCase()
 
 const sock = new CoapSocket(HOST)
 try {
@@ -263,6 +271,11 @@ try {
 
   const status = JSON.parse(decrypt(observation.first.payload.toString())).state.reported
   console.log('[4] decrypted', Object.keys(status).length, 'keys | model', status.D01S05, '| temp', status.D03224 / 10, 'C | pm25', status.D03221)
+  console.log('    power:', status.D03102, '| mode:', status.D0310C, '| speed:', status.D0310D,
+    '| humidity:', status.D03125, '| child lock:', status.D03103)
+  console.log('    prefilter:', `${Math.round(status.D0520D / status.D05207 * 100)}%`,
+    '| nanoprotect:', `${Math.round(status.D0540E / status.D05408 * 100)}%`, '| error:', status.D03240)
+  console.log('    full:', JSON.stringify(status))
 
   await new Promise(r => setTimeout(r, 6000))
   console.log(`[5] pushes in 6s: ${pushes}`)
@@ -271,6 +284,29 @@ try {
   const before = pushes
   await new Promise(r => setTimeout(r, 5000))
   console.log(`[6] after proactive cancel, further pushes: ${pushes - before} (0 means cancellation worked)`)
+
+  // Optional control round-trip. Opt-in, because it writes to a real device.
+  // Toggles beep (D03130) and puts the original value straight back.
+  if (!process.argv.includes('--write')) {
+    console.log('[7] skipped control write (pass --write to test it)')
+  } else if (status.D03130 === undefined) {
+    console.log('[7] skipped: no D03130 key on this device')
+  } else {
+    let clientKey = (await sock.request({
+      method: 'POST', path: '/sys/dev/sync', payload: crypto.randomBytes(4).toString('hex').toUpperCase(),
+    })).payload.toString().trim()
+    const original = status.D03130
+    // D03130 is boolean but stored as 0/100 — writing 1 reads back 100.
+    const desired = v => JSON.stringify({
+      state: { desired: { CommandType: 'app', DeviceId: '', EnduserId: '', D03130: v } },
+    })
+    for (const value of [original ? 0 : 100, original]) {
+      clientKey = nextKey(clientKey)
+      const res = await sock.request({ method: 'POST', path: '/sys/dev/control', payload: encrypt(clientKey, desired(value)) })
+      console.log(`[7] control D03130=${value} ->`, res.payload.toString())
+    }
+    console.log(`[7] restored D03130 to ${original}`)
+  }
 } finally {
   sock.close()
 }
