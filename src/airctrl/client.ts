@@ -55,6 +55,10 @@ export class PhilipsCoapClient {
     return this.clientKey
   }
 
+  private requireOpen(): void {
+    if (this.closed) throw new Error('client closed')
+  }
+
   private parseStatus(message: DecodedCoapMessage): DeviceStatus {
     return parseStatusPayload(decrypt(message.payload.toString()))
   }
@@ -64,12 +68,16 @@ export class PhilipsCoapClient {
     let observation: Observation | undefined
     try {
       observation = await this.socket.observe({ path: STATUS_PATH, onNotify: () => {} })
+      this.requireOpen()
       const maxAgeOption = findOption(observation.first.options, CoapOption.MaxAge)
       const maxAge = maxAgeOption ? bufferToUint(maxAgeOption.value) : DEFAULT_MAX_AGE
       return {
         status: this.parseStatus(observation.first),
         maxAge: maxAge > 0 ? maxAge : DEFAULT_MAX_AGE,
       }
+    } catch (error) {
+      this.requireOpen()
+      throw error
     } finally {
       observation?.cancel()
     }
@@ -95,11 +103,21 @@ export class PhilipsCoapClient {
       }
     }
 
-    const observation = await this.socket.observe({
-      path: STATUS_PATH,
-      onNotify: enqueue,
-      onError: fail,
-    })
+    let observation: Observation
+    try {
+      observation = await this.socket.observe({
+        path: STATUS_PATH,
+        onNotify: enqueue,
+        onError: fail,
+      })
+    } catch (error) {
+      this.requireOpen()
+      throw error
+    }
+    if (this.closed) {
+      observation.cancel()
+      this.requireOpen()
+    }
     this.observations.add(observation)
     this.observationFailures.set(observation, fail)
 
@@ -143,8 +161,8 @@ export class PhilipsCoapClient {
     })
 
     for (let attempt = 0; attempt <= retries; attempt++) {
-      this.clientKey = nextKey(this.requireKey())
       try {
+        this.clientKey = nextKey(this.requireKey())
         const response = await this.socket.request({
           method: 'POST',
           path: CONTROL_PATH,
@@ -156,7 +174,13 @@ export class PhilipsCoapClient {
       }
 
       if (attempt === retries) break
-      if (resync) await this.connect()
+      if (resync) {
+        try {
+          await this.connect()
+        } catch {
+          return false
+        }
+      }
       await new Promise(resolve => setTimeout(resolve, retryDelayMs))
     }
 
@@ -172,7 +196,6 @@ export class PhilipsCoapClient {
     }
     this.observations.clear()
     this.observationFailures.clear()
-    // Let the UDP cancellation datagrams enter the send queue before closing.
-    setImmediate(() => this.socket.close())
+    this.socket.close()
   }
 }

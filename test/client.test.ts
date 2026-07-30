@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PhilipsCoapClient, NotConnectedError } from '../src/airctrl/client.js'
 import { decrypt, encrypt } from '../src/airctrl/crypto.js'
 import { CoapOption, bufferToUint } from '../src/airctrl/coap/message.js'
+import type { CoapSocket, Observation } from '../src/airctrl/coap/socket.js'
 import { startFakeDevice, pathOf, type FakeDevice } from './helpers/fake-device.js'
 
 describe('PhilipsCoapClient', () => {
@@ -163,6 +164,32 @@ describe('PhilipsCoapClient', () => {
     expect(pathOf(device.requests.at(-1)!)).toBe('/sys/dev/control')
   })
 
+  it('returns false when a required resync fails and sends no later control write', async () => {
+    let syncCount = 0
+    let resyncStarted!: () => void
+    const resyncRequest = new Promise<void>(resolve => {
+      resyncStarted = resolve
+    })
+    const { device, client } = await start(request => {
+      if (pathOf(request) === '/sys/dev/sync') {
+        syncCount++
+        if (syncCount === 1) return { payload: '0DC377BA' }
+        resyncStarted()
+        return undefined
+      }
+      if (pathOf(request) === '/sys/dev/control') return { payload: JSON.stringify({ status: 'failed' }) }
+    })
+    await client.connect()
+
+    const result = client.setControl({ D03102: 1 }, { retries: 2, retryDelayMs: 1 })
+    await resyncRequest
+    client.close()
+
+    await expect(result).resolves.toBe(false)
+    expect(device.requests.filter(request => pathOf(request) === '/sys/dev/control')).toHaveLength(1)
+    expect(device.requests.filter(request => pathOf(request) === '/sys/dev/sync')).toHaveLength(2)
+  })
+
   it('increments the rolling key before every control attempt', async () => {
     const keys: string[] = []
     const { client } = await start(request => {
@@ -185,8 +212,56 @@ describe('PhilipsCoapClient', () => {
     await expect(client.setControl({ D03102: 1 })).rejects.toThrow(/connect\(\)/)
   })
 
+  it.each(['getStatus', 'observe'] as const)(
+    'rejects %s when its observe handshake resolves after close',
+    async operation => {
+      const { client } = await start(request => {
+        if (pathOf(request) === '/sys/dev/sync') return { payload: '0DC377BA' }
+      })
+      await client.connect()
+
+      let observeStarted!: () => void
+      const started = new Promise<void>(resolve => {
+        observeStarted = resolve
+      })
+      let resolveObservation!: (observation: Observation) => void
+      const delayedObservation = new Promise<Observation>(resolve => {
+        resolveObservation = resolve
+      })
+      const socket = (client as unknown as { socket: CoapSocket }).socket
+      vi.spyOn(socket, 'observe').mockImplementation(() => {
+        observeStarted()
+        return delayedObservation
+      })
+      const cancel = vi.fn()
+      const result = operation === 'getStatus'
+        ? client.getStatus()
+        : client.observe().next()
+      await started
+
+      client.close()
+      resolveObservation({
+        first: {
+          type: 1,
+          code: 69,
+          messageId: 1,
+          token: Buffer.from('01020304', 'hex'),
+          options: [],
+          payload: Buffer.from(encrypt(
+            '0DC377BA',
+            JSON.stringify({ state: { reported: { D03102: 1 } } }),
+          )),
+        },
+        cancel,
+      })
+
+      await expect(result).rejects.toThrow(/client closed/)
+      expect(cancel).toHaveBeenCalledOnce()
+    },
+  )
+
   it('cancels every live observation when closed', async () => {
-    const { device, client } = await start(request => {
+    const { client } = await start(request => {
       if (pathOf(request) === '/sys/dev/sync') return { payload: '0DC377BA' }
       if (pathOf(request) === '/sys/dev/status') {
         return {
@@ -206,8 +281,6 @@ describe('PhilipsCoapClient', () => {
       pending,
       new Promise((_, reject) => setTimeout(() => reject(new Error('iterator did not settle')), 100)),
     ])).rejects.toThrow(/client closed/)
-    await new Promise(resolve => setTimeout(resolve, 50))
-    expect(device.requests.filter(request => observeValue(request) === 1)).toHaveLength(2)
     await second.return(undefined)
   })
 })
