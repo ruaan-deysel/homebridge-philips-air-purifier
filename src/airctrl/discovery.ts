@@ -87,6 +87,7 @@ export async function probeHost(
   } finally {
     if (timer) clearTimeout(timer)
     client.close()
+    await new Promise<void>(resolve => setImmediate(resolve))
   }
 }
 

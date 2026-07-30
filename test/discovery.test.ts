@@ -144,6 +144,29 @@ describe('probeHost', () => {
     await expect(probeHost('127.0.0.1', device.port, 10)).resolves.toBeNull()
   })
 
+  it('has no request or probe timer when a timeout resolves', async () => {
+    const device = await startFakeDevice(() => undefined)
+    devices.push(device)
+    vi.useFakeTimers()
+
+    try {
+      const result = probeHost('127.0.0.1', device.port, 10)
+      let resolved = false
+      void result.then(() => {
+        resolved = true
+      })
+      await vi.advanceTimersByTimeAsync(10)
+
+      expect(resolved).toBe(false)
+      await vi.advanceTimersToNextTimerAsync()
+      await expect(result).resolves.toBeNull()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      await vi.runAllTimersAsync()
+      vi.useRealTimers()
+    }
+  })
+
   it('clears its deadline after a fast response', async () => {
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout')
