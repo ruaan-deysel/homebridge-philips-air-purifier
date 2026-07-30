@@ -337,9 +337,13 @@ const CONFIG_AC4220 = config({
   apiGeneration: ApiGeneration.Gen3,
   presetModes: AC32XX_PRESETS_HW,
   speeds: AC32XX_SPEEDS,
+  // LAMP_MODE (D03135) is promoted here per hardware fact 1, not dropped — it
+  // is upstream's NEW2_LAMP_MODE, normally a select. Upstream's selects also has
+  // NEW2_TIMER2 (D03110#2, confirmed present on the captured device, value 0)
+  // ahead of NEW2_PREFERRED_INDEX; keep that ordering.
   lights: [Gen3Key.LAMP_MODE],
   switches: [Gen3Key.CHILD_LOCK, Gen3Key.BEEP, Gen3Key.AUTO_PLUS_AI],
-  selects: [`${Gen3Key.PREFERRED_INDEX}#1`],
+  selects: [`${Gen3Key.TIMER}#2`, `${Gen3Key.PREFERRED_INDEX}#1`],
 })
 
 // AC2210/AC2221 (PureProtect Quiet 2200 series). Not hardware-verified: presets
@@ -721,7 +725,7 @@ export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
     apiGeneration: ApiGeneration.Gen3,
     presetModes: AMFXXX_PRESETS,
     speeds: AMFXXX_SPEEDS,
-    lights: [Gen3Key.DISPLAY_BACKLIGHT_ALT],
+    lights: [Gen3Key.DISPLAY_BACKLIGHT_PRIMARY],
     switches: [Gen3Key.CHILD_LOCK, Gen3Key.BEEP, Gen3Key.STANDBY_SENSORS, Gen3Key.AUTO_PLUS_AI],
     selects: [`${Gen3Key.MODE_A}#1`],
     numbers: [Gen3Key.OSCILLATION],
@@ -733,7 +737,7 @@ export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
     apiGeneration: ApiGeneration.Gen3,
     presetModes: AMFXXX_PRESETS,
     speeds: AMFXXX_SPEEDS,
-    lights: [Gen3Key.DISPLAY_BACKLIGHT_ALT],
+    lights: [Gen3Key.DISPLAY_BACKLIGHT_PRIMARY],
     switches: [Gen3Key.CHILD_LOCK, Gen3Key.BEEP, Gen3Key.STANDBY_SENSORS, Gen3Key.AUTO_PLUS_AI],
     selects: [`${Gen3Key.PREFERRED_INDEX}#2`, `${Gen3Key.MODE_A}#2`],
     numbers: [Gen3Key.TARGET_TEMP],

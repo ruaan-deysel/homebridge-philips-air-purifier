@@ -112,8 +112,12 @@ export const Gen3Key = {
    * ignored, and it reads 101 when the lamp is on. Use LAMP_MODE to control it.
    */
   DISPLAY_BACKLIGHT: 'D03105',
-  /** Alternate display-backlight key used by AMF765/AMF870 (source: NEW2_DISPLAY_BACKLIGHT). */
-  DISPLAY_BACKLIGHT_ALT: 'D0312D',
+  /**
+   * Display-backlight key used by AMF765/AMF870 (source: NEW2_DISPLAY_BACKLIGHT,
+   * upstream's primary variant). DISPLAY_BACKLIGHT above (D03105) is upstream's
+   * NEW2_DISPLAY_BACKLIGHT2 — a different key, not a fallback for this one.
+   */
+  DISPLAY_BACKLIGHT_PRIMARY: 'D0312D',
   MODE_A: 'D0310A',
   /** Mode and speed selector: 0 auto, 1-5 speeds (5 == turbo), 17 sleep, 18 turbo, 19 medium. */
   MODE_B: 'D0310C',

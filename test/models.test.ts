@@ -30,6 +30,15 @@ describe('resolveModel', () => {
     expect(config.presetModes.sleep).toEqual({ D03102: 1, D0310C: 17 })
   })
 
+  it('keeps AC4220 selects matching upstream minus the hardware-promoted lamp mode', () => {
+    // Upstream: [NEW2_TIMER2, NEW2_LAMP_MODE, NEW2_PREFERRED_INDEX]. LAMP_MODE
+    // moved to `lights` per hardware fact 1 (D03135 is the real light control),
+    // but TIMER2 and PREFERRED_INDEX must still be present, in upstream order.
+    const config = resolveModel('AC4220/12')
+    expect(config.selects).toEqual(['D03110#2', 'D0312A#1'])
+    expect(config.lights).toEqual(['D03135'])
+  })
+
   it('prefers an exact match over the family prefix', () => {
     // 'AC0850/81' is an exact registry key, while its 6-char prefix 'AC0850' is
     // not — so this asserts the exact branch is taken, by identity.
