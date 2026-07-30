@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { ApiGeneration, DEVICE_MODELS, deviceKey, powerValues, resolveModel } from '../src/device/models.js'
+import {
+  ApiGeneration,
+  detectGeneration,
+  DEVICE_MODELS,
+  deviceKey,
+  powerValues,
+  resolveModel,
+} from '../src/device/models.js'
 
 describe('deviceKey', () => {
   it.each([
@@ -52,14 +59,80 @@ describe('resolveModel', () => {
     expect(config.speeds).toEqual({})
   })
 
-  // NOTE: The brief's stated count is 61, but the source repository this task was
-  // told to clone (github.com/ruaan-deysel/ha-philips-airpurifier) currently has
-  // 62 distinct entries in DEVICE_MODELS (verified via Python AST parse — no
-  // duplicate FanModel string values, all 62 keys present in the dict literal).
-  // "Port from data, not from memory" is followed here: all 62 registry entries
-  // are transcribed, and this assertion reflects the real data rather than the
-  // brief's count. See task-5-report.md for details.
+  it.each([
+    [ApiGeneration.Gen3, { D03102: 0 }, { key: 'D03102', on: 1, off: 0 }],
+    [ApiGeneration.Gen2, { 'D03-02': 'OFF' }, { key: 'D03-02', on: 'ON', off: 'OFF' }],
+    [ApiGeneration.Gen1, { pwr: '0' }, { key: 'pwr', on: '1', off: '0' }],
+  ])('detects %s for an unknown model and uses its power values', (expectedGeneration, status, expectedPower) => {
+    const config = resolveModel('XX9999/99', detectGeneration(status))
+    expect(config.apiGeneration).toBe(expectedGeneration)
+    expect(powerValues(config.apiGeneration)).toEqual(expectedPower)
+  })
+
   it('has all 62 models from the HA registry', () => {
-    expect(Object.keys(DEVICE_MODELS)).toHaveLength(62)
+    expect(Object.keys(DEVICE_MODELS).sort()).toEqual([
+      'AC0650',
+      'AC0850/11 AWS_Philips_AIR',
+      'AC0850/11 AWS_Philips_AIR_Combo',
+      'AC0850/20 AWS_Philips_AIR',
+      'AC0850/20 AWS_Philips_AIR_Combo',
+      'AC0850/31 AWS_Philips_AIR',
+      'AC0850/31 AWS_Philips_AIR_Combo',
+      'AC0850/41 AWS_Philips_AIR',
+      'AC0850/41 AWS_Philips_AIR_Combo',
+      'AC0850/70 AWS_Philips_AIR',
+      'AC0850/70 AWS_Philips_AIR_Combo',
+      'AC0850/81',
+      'AC0850/85',
+      'AC0950',
+      'AC0951',
+      'AC1214',
+      'AC1715',
+      'AC2210',
+      'AC2221',
+      'AC2729',
+      'AC2889',
+      'AC2936',
+      'AC2939',
+      'AC2958',
+      'AC2959',
+      'AC3033',
+      'AC3036',
+      'AC3039',
+      'AC3055',
+      'AC3059',
+      'AC3210',
+      'AC3220',
+      'AC3221',
+      'AC3259',
+      'AC3420',
+      'AC3421',
+      'AC3737',
+      'AC3829',
+      'AC3836',
+      'AC3854/50',
+      'AC3854/51',
+      'AC3858/50',
+      'AC3858/51',
+      'AC3858/83',
+      'AC3858/86',
+      'AC4220',
+      'AC4221',
+      'AC4236',
+      'AC4550',
+      'AC4558',
+      'AC5659',
+      'AC5660',
+      'AMF765',
+      'AMF870',
+      'CX3120',
+      'CX3550',
+      'CX5120',
+      'CX7550',
+      'HU1509',
+      'HU1510',
+      'HU4209/00',
+      'HU5710',
+    ])
   })
 })
