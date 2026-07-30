@@ -1,0 +1,60 @@
+{
+  "pluginAlias": "PhilipsAir",
+  "pluginType": "platform",
+  "singular": true,
+  "customUiPath": "./homebridge-ui",
+  "headerDisplay": "Philips air purifiers over encrypted CoAP. Use the panel above to scan for devices — no JSON editing required.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Platform Name",
+        "type": "string",
+        "default": "Philips Air",
+        "required": true
+      },
+      "devices": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "host": {
+              "title": "IP Address",
+              "type": "string",
+              "required": true
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "port": {
+              "title": "CoAP Port",
+              "type": "integer",
+              "default": 5683
+            },
+            "exposeLight": {
+              "title": "Expose display light",
+              "type": "boolean",
+              "default": true
+            },
+            "exposeSleepSwitch": {
+              "title": "Expose Sleep switch",
+              "type": "boolean",
+              "default": false
+            },
+            "exposeAutoPlusSwitch": {
+              "title": "Expose Auto+ AI switch",
+              "type": "boolean",
+              "default": false
+            },
+            "exposeBeepSwitch": {
+              "title": "Expose Beep switch",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      }
+    }
+  }
+}
