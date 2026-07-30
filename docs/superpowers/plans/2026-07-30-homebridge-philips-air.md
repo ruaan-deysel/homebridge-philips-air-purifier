@@ -6,13 +6,20 @@
 
 **Architecture:** Four layers with one-way dependencies: `crypto` (pure functions) → `client` (one device's CoAP conversation) → `coordinator` (liveness, observe stream, change detection) → `accessory` (HomeKit characteristic translation). Device capabilities live in flat data tables ported from the Home Assistant integration. A custom Homebridge UI handles discovery and configuration so no JSON is ever hand-edited.
 
-**Tech Stack:** TypeScript (ESM), Node 22/24, Homebridge 2.x, `coap` 1.5.0, `zod` 4.x, Vitest, `@homebridge/plugin-ui-utils`.
+**Tech Stack:** TypeScript (ESM), Node 22/24, Homebridge 2.x, `zod` 4.x, Vitest, `@homebridge/plugin-ui-utils`. CoAP is implemented in-package over `node:dgram` — there is no third-party protocol dependency.
 
 **Global Constraints:**
 - **ESM only.** `"type": "module"` in package.json. Homebridge 2 dropped CommonJS; a CJS plugin will not load. All relative imports need explicit `.js` extensions.
 - **HAP types come from `homebridge`**, never from `@homebridge/hap-nodejs` directly.
 - `engines`: `homebridge: "^2.0.0"`, `node: "^22.12.0 || ^24.0.0"`.
 - **`nextKey` must use `>>> 0`, never `& 0xFFFFFFFF`.** JS `&` is signed 32-bit; the direct Python transliteration corrupts keys above `0x7FFFFFFF`.
+- **CoAP is ours, and stays minimal.** NON messages only (`type = 1`), `GET`/`POST`
+  only, three options (`Uri-Path` 11, `Observe` 6, `Max-Age` 14). No CON/ACK
+  retransmission, no block-wise transfer, no DTLS, no server mode, no multicast.
+  Do not add protocol surface that no endpoint in this plugin uses.
+- **Responses are matched to requests by token, not message ID.** Observe
+  notifications reuse the original request's token; matching on message ID would
+  drop every push.
 - **A `status: "success"` ACK from `/sys/dev/control` means accepted, not applied.** Verified on hardware: ignored writes still ACK. Never apply writes optimistically — the observe stream is the only source of truth.
 - **Never publish a characteristic update unless the value actually changed.** The device pushes ~2×/second.
 - **The device key is the part before `#`.** Registry keys like `D03105#1` are variant discriminators, not device keys.
@@ -30,6 +37,7 @@
 - `docs/superpowers/specs/2026-07-30-homebridge-philips-air-design.md` — the design
 - `test/fixtures/ac4220-12-status.json` — real 59-key device payload
 - `scripts/spike.mjs`, `scripts/explore.mjs`, `scripts/explore2.mjs` — working probes
+- `scripts/coap-spike.mjs` — **the working reference implementation of Tasks 2 and 4.** Contains a passing RFC 7252 codec, a `node:dgram` transport with token matching, and verified observe registration and cancellation against the real device. Port from this rather than writing from scratch.
 - Python source to port: clone `https://github.com/ruaan-deysel/philips-airctrl` and `https://github.com/ruaan-deysel/ha-philips-airpurifier`
 
 **Deployment target** (verified by inspection):
@@ -98,7 +106,6 @@
   },
   "dependencies": {
     "@homebridge/plugin-ui-utils": "^2.0.0",
-    "coap": "^1.5.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -411,7 +418,765 @@ random sync keys reach about half the time. Regression tested."
 
 ---
 
-### Task 2: Define the zod trust boundaries
+### Task 2: Implement minimal CoAP over node:dgram
+
+**Goal:** `src/airctrl/coap/message.ts` and `src/airctrl/coap/socket.ts` — just
+enough RFC 7252 to talk to Philips firmware, with no third-party dependency.
+
+**Files:**
+- Create: `src/airctrl/coap/message.ts`
+- Create: `src/airctrl/coap/socket.ts`
+- Create: `test/coap-message.test.ts`
+- Create: `test/coap-socket.test.ts`
+- Reference: `scripts/coap-spike.mjs` — a working, hardware-verified version of both files. Port from it.
+
+**Acceptance Criteria:**
+- [ ] `encode` produces the exact golden bytes for `GET /sys/dev/status` with Observe: `54011234deadbeef60537379730364657606737461747573`
+- [ ] `encode` produces the exact golden bytes for `POST /sys/dev/sync` with payload `ABCD1234`: `5402000101020304b3737973036465760473796e63ff4142434431323334`
+- [ ] `decode(encode(m))` round-trips type, code, messageId, token, options and payload
+- [ ] Option lengths ≥ 13 and ≥ 269 use the 13/14 extension nibbles correctly in both directions
+- [ ] `uintToBuffer` emits shortest-form big-endian: `0` → empty, `60` → `3c`, `900` → `0384`
+- [ ] `decode` rejects a message shorter than 4 bytes, an unsupported version, a token length > 8, and the reserved nibble 15
+- [ ] Options are emitted sorted by number, so a caller passing Uri-Path before Observe still produces a valid delta chain
+- [ ] `CoapSocket.request()` resolves the matching response, matched **by token**
+- [ ] `CoapSocket.observe()` resolves the first response and invokes `onNotify` for each later push
+- [ ] `observe().cancel()` sends the same token with `Observe: 1` and stops notifications
+- [ ] A response with an unknown token is ignored rather than throwing
+- [ ] A malformed datagram is ignored rather than crashing the socket
+- [ ] `request()` rejects on timeout and cleans up its handler (no leak)
+- [ ] Only `node:dgram` and `node:crypto` are imported — no third-party packages
+
+**Verify:** `npx vitest run test/coap-message.test.ts test/coap-socket.test.ts` → all tests pass; then `node scripts/coap-spike.mjs 192.168.20.151` prints `codec self-check: PASS`, `Max-Age 60`, `59 keys`, and `after proactive cancel, further pushes: 0`
+
+**Steps:**
+
+- [ ] **Step 1: Write the failing codec tests**
+
+The golden byte strings below were produced by the working spike and verified
+against the real device. They are the authority — if the implementation disagrees,
+the implementation is wrong.
+
+```typescript
+// test/coap-message.test.ts
+import { describe, expect, it } from 'vitest'
+import {
+  CoapCode,
+  CoapOption,
+  CoapType,
+  bufferToUint,
+  decode,
+  encode,
+  uintToBuffer,
+} from '../src/airctrl/coap/message.js'
+
+const uriPath = (path: string) =>
+  path.split('/').filter(Boolean).map(segment => ({ number: CoapOption.UriPath, value: Buffer.from(segment) }))
+
+describe('uintToBuffer / bufferToUint', () => {
+  it.each([
+    [0, ''],
+    [60, '3c'],
+    [900, '0384'],
+    [0xFFFFFF, 'ffffff'],
+  ])('encodes %i as shortest-form big-endian %s', (value, hex) => {
+    expect(uintToBuffer(value).toString('hex')).toBe(hex)
+  })
+
+  it('round-trips', () => {
+    for (const value of [0, 1, 60, 900, 0xFFFF, 0xFFFFFF]) {
+      expect(bufferToUint(uintToBuffer(value))).toBe(value)
+    }
+  })
+})
+
+describe('encode golden vectors', () => {
+  it('encodes GET /sys/dev/status with Observe', () => {
+    const bytes = encode({
+      type: CoapType.NonConfirmable,
+      code: CoapCode.GET,
+      messageId: 0x1234,
+      token: Buffer.from('deadbeef', 'hex'),
+      options: [...uriPath('/sys/dev/status'), { number: CoapOption.Observe, value: uintToBuffer(0) }],
+    })
+    expect(bytes.toString('hex')).toBe('54011234deadbeef60537379730364657606737461747573')
+  })
+
+  it('encodes POST /sys/dev/sync with a payload', () => {
+    const bytes = encode({
+      type: CoapType.NonConfirmable,
+      code: CoapCode.POST,
+      messageId: 1,
+      token: Buffer.from('01020304', 'hex'),
+      options: uriPath('/sys/dev/sync'),
+      payload: Buffer.from('ABCD1234'),
+    })
+    expect(bytes.toString('hex')).toBe('5402000101020304b3737973036465760473796e63ff4142434431323334')
+  })
+
+  it('sorts options by number regardless of caller order', () => {
+    const observeFirst = encode({
+      code: CoapCode.GET,
+      messageId: 0x1234,
+      token: Buffer.from('deadbeef', 'hex'),
+      options: [{ number: CoapOption.Observe, value: uintToBuffer(0) }, ...uriPath('/sys/dev/status')],
+    })
+    expect(observeFirst.toString('hex')).toBe('54011234deadbeef60537379730364657606737461747573')
+  })
+})
+
+describe('decode', () => {
+  it('round-trips a full message', () => {
+    const original = {
+      type: CoapType.NonConfirmable,
+      code: CoapCode.POST,
+      messageId: 0xBEEF,
+      token: Buffer.from('0a0b0c0d', 'hex'),
+      options: [...uriPath('/sys/dev/control'), { number: CoapOption.MaxAge, value: uintToBuffer(60) }],
+      payload: Buffer.from('{"a":1}'),
+    }
+    const decoded = decode(encode(original))
+    expect(decoded.type).toBe(CoapType.NonConfirmable)
+    expect(decoded.code).toBe(CoapCode.POST)
+    expect(decoded.messageId).toBe(0xBEEF)
+    expect(decoded.token.toString('hex')).toBe('0a0b0c0d')
+    expect(decoded.payload.toString()).toBe('{"a":1}')
+    expect(decoded.options.filter(o => o.number === CoapOption.UriPath).map(o => o.value.toString()))
+      .toEqual(['sys', 'dev', 'control'])
+    expect(bufferToUint(decoded.options.find(o => o.number === CoapOption.MaxAge)!.value)).toBe(60)
+  })
+
+  it.each([13, 268, 269, 1000])('round-trips an option of length %i via the extension nibbles', (length) => {
+    const decoded = decode(encode({
+      code: CoapCode.GET,
+      messageId: 1,
+      options: [{ number: CoapOption.UriPath, value: Buffer.alloc(length, 0x61) }],
+    }))
+    expect(decoded.options[0]!.value.length).toBe(length)
+  })
+
+  it('parses a 2.05 Content response code', () => {
+    const decoded = decode(encode({ code: 69, messageId: 1 })) // 2.05 = (2 << 5) | 5
+    expect(decoded.code).toBe(69)
+    expect(decoded.code >> 5).toBe(2)
+    expect(decoded.code & 0x1F).toBe(5)
+  })
+
+  it('rejects malformed input', () => {
+    expect(() => decode(Buffer.alloc(3))).toThrow(/4 bytes/)
+    expect(() => decode(Buffer.from([0x00, 0x01, 0x00, 0x01]))).toThrow(/version/) // version 0
+    expect(() => decode(Buffer.from([0x4F, 0x01, 0x00, 0x01]))).toThrow(/token length/) // TKL 15
+    expect(() => decode(Buffer.from([0x40, 0x01, 0x00, 0x01, 0xF0]))).toThrow(/reserved/) // nibble 15
+  })
+
+  it('handles a message with no options and no payload', () => {
+    const decoded = decode(encode({ code: CoapCode.GET, messageId: 7 }))
+    expect(decoded.options).toEqual([])
+    expect(decoded.payload.length).toBe(0)
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+```bash
+npx vitest run test/coap-message.test.ts
+```
+
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement `src/airctrl/coap/message.ts`**
+
+```typescript
+/**
+ * Minimal RFC 7252 codec — only what Philips firmware needs.
+ *
+ * Deliberately absent: CON/ACK retransmission, block-wise transfer, DTLS,
+ * server mode, multicast. Do not add protocol surface no endpoint uses.
+ * Pure functions, no I/O, so this is fully testable on byte arrays.
+ */
+
+export const CoapType = {
+  Confirmable: 0,
+  NonConfirmable: 1,
+  Acknowledgement: 2,
+  Reset: 3,
+} as const
+
+export const CoapCode = {
+  GET: 1, // 0.01
+  POST: 2, // 0.02
+} as const
+
+export const CoapOption = {
+  Observe: 6,
+  UriPath: 11,
+  ContentFormat: 12,
+  MaxAge: 14,
+} as const
+
+export interface CoapOptionEntry {
+  number: number
+  value: Buffer
+}
+
+export interface CoapMessage {
+  type?: number
+  code: number
+  messageId: number
+  token?: Buffer
+  options?: CoapOptionEntry[]
+  payload?: Buffer
+}
+
+export interface DecodedCoapMessage {
+  type: number
+  code: number
+  messageId: number
+  token: Buffer
+  options: CoapOptionEntry[]
+  payload: Buffer
+}
+
+const PAYLOAD_MARKER = 0xFF
+
+/** Shortest-form big-endian unsigned integer, as CoAP option values require. */
+export function uintToBuffer(value: number): Buffer {
+  if (value === 0) return Buffer.alloc(0)
+  const bytes: number[] = []
+  let remaining = value
+  while (remaining > 0) {
+    bytes.unshift(remaining & 0xFF)
+    remaining = Math.floor(remaining / 256)
+  }
+  return Buffer.from(bytes)
+}
+
+export function bufferToUint(buffer: Buffer): number {
+  return buffer.reduce((acc, byte) => acc * 256 + byte, 0)
+}
+
+/** Option deltas and lengths use 13/14 as escapes for 1- and 2-byte extensions. */
+function nibbleFor(value: number): number {
+  if (value < 13) return value
+  if (value < 269) return 13
+  return 14
+}
+
+function extensionFor(value: number): Buffer {
+  if (value < 13) return Buffer.alloc(0)
+  if (value < 269) return Buffer.from([value - 13])
+  const buffer = Buffer.alloc(2)
+  buffer.writeUInt16BE(value - 269)
+  return buffer
+}
+
+export function encode(message: CoapMessage): Buffer {
+  const token = message.token ?? Buffer.alloc(0)
+  if (token.length > 8) throw new Error(`token too long: ${token.length} bytes (max 8)`)
+
+  const header = Buffer.alloc(4)
+  header[0] = (1 << 6) | ((message.type ?? CoapType.NonConfirmable) << 4) | token.length
+  header[1] = message.code
+  header.writeUInt16BE(message.messageId, 2)
+
+  // Deltas are relative to the previous option number, so options must be sorted.
+  const sorted = [...(message.options ?? [])].sort((a, b) => a.number - b.number)
+  const parts: Buffer[] = [header, token]
+  let previous = 0
+  for (const { number, value } of sorted) {
+    const delta = number - previous
+    parts.push(
+      Buffer.from([(nibbleFor(delta) << 4) | nibbleFor(value.length)]),
+      extensionFor(delta),
+      extensionFor(value.length),
+      value,
+    )
+    previous = number
+  }
+
+  if (message.payload?.length) parts.push(Buffer.from([PAYLOAD_MARKER]), message.payload)
+  return Buffer.concat(parts)
+}
+
+export function decode(buffer: Buffer): DecodedCoapMessage {
+  if (buffer.length < 4) throw new Error('CoAP message shorter than 4 bytes')
+
+  const version = buffer[0]! >> 6
+  if (version !== 1) throw new Error(`unsupported CoAP version ${version}`)
+
+  const type = (buffer[0]! >> 4) & 0x03
+  const tokenLength = buffer[0]! & 0x0F
+  if (tokenLength > 8) throw new Error(`invalid token length ${tokenLength}`)
+
+  const code = buffer[1]!
+  const messageId = buffer.readUInt16BE(2)
+
+  let offset = 4
+  const token = buffer.subarray(offset, offset + tokenLength)
+  offset += tokenLength
+
+  const options: CoapOptionEntry[] = []
+  let number = 0
+  while (offset < buffer.length && buffer[offset] !== PAYLOAD_MARKER) {
+    const byte = buffer[offset++]!
+    const readExtension = (nibble: number): number => {
+      if (nibble === 13) return buffer[offset++]! + 13
+      if (nibble === 14) {
+        const value = buffer.readUInt16BE(offset) + 269
+        offset += 2
+        return value
+      }
+      if (nibble === 15) throw new Error('reserved option nibble 15')
+      return nibble
+    }
+    const delta = readExtension(byte >> 4)
+    const length = readExtension(byte & 0x0F)
+    number += delta
+    options.push({ number, value: buffer.subarray(offset, offset + length) })
+    offset += length
+  }
+
+  const payload = buffer[offset] === PAYLOAD_MARKER ? buffer.subarray(offset + 1) : Buffer.alloc(0)
+  return { type, code, messageId, token, options, payload }
+}
+
+/** Find the first option with the given number, or undefined. */
+export function findOption(options: CoapOptionEntry[], number: number): CoapOptionEntry | undefined {
+  return options.find(option => option.number === number)
+}
+
+/** Build the repeated Uri-Path options for a path like "/sys/dev/status". */
+export function uriPathOptions(path: string): CoapOptionEntry[] {
+  return path.split('/').filter(Boolean).map(segment => ({
+    number: CoapOption.UriPath,
+    value: Buffer.from(segment, 'utf8'),
+  }))
+}
+
+/** Human-readable code, e.g. 69 -> "2.05". Used in log messages only. */
+export function codeToString(code: number): string {
+  return `${code >> 5}.${String(code & 0x1F).padStart(2, '0')}`
+}
+```
+
+- [ ] **Step 4: Run the codec tests**
+
+```bash
+npx vitest run test/coap-message.test.ts
+```
+
+Expected: PASS, including both golden-byte assertions.
+
+- [ ] **Step 5: Write the failing socket tests**
+
+The fake device is built with our own `encode`, which keeps the test independent
+of any library and lets us script exact responses.
+
+```typescript
+// test/coap-socket.test.ts
+import dgram from 'node:dgram'
+import { afterEach, describe, expect, it } from 'vitest'
+import { CoapOption, decode, encode, findOption, uintToBuffer } from '../src/airctrl/coap/message.js'
+import { CoapSocket } from '../src/airctrl/coap/socket.js'
+
+const CONTENT_2_05 = 69
+
+/** A scriptable fake CoAP device on localhost. */
+function fakeDevice(handler: (request: ReturnType<typeof decode>, reply: (m: Parameters<typeof encode>[0]) => void) => void) {
+  const server = dgram.createSocket('udp4')
+  server.on('message', (buffer, remote) => {
+    let request
+    try { request = decode(buffer) } catch { return }
+    handler(request, message => server.send(encode(message), remote.port, remote.address))
+  })
+  return {
+    server,
+    listen: () => new Promise<number>(resolve => server.bind(0, () => resolve(server.address().port))),
+    close: () => new Promise<void>(resolve => server.close(() => resolve())),
+  }
+}
+
+let device: ReturnType<typeof fakeDevice> | null = null
+let socket: CoapSocket | null = null
+
+afterEach(async () => {
+  socket?.close()
+  socket = null
+  await device?.close()
+  device = null
+})
+
+describe('CoapSocket.request', () => {
+  it('resolves the response matched by token', async () => {
+    device = fakeDevice((request, reply) => {
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from('pong') })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    const response = await socket.request({ method: 'GET', path: '/sys/dev/info' })
+    expect(response.payload.toString()).toBe('pong')
+    expect(response.code).toBe(CONTENT_2_05)
+  })
+
+  it('sends the path as repeated Uri-Path options and type NON', async () => {
+    let seen: ReturnType<typeof decode> | null = null
+    device = fakeDevice((request, reply) => {
+      seen = request
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from('ok') })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    await socket.request({ method: 'POST', path: '/sys/dev/sync', payload: 'NONCE' })
+    expect(seen!.type).toBe(1) // NON
+    expect(seen!.options.filter(o => o.number === CoapOption.UriPath).map(o => o.value.toString()))
+      .toEqual(['sys', 'dev', 'sync'])
+    expect(seen!.payload.toString()).toBe('NONCE')
+  })
+
+  it('ignores a response bearing an unknown token, then still resolves the right one', async () => {
+    device = fakeDevice((request, reply) => {
+      reply({ code: CONTENT_2_05, messageId: 1, token: Buffer.from('ffffffff', 'hex'), payload: Buffer.from('wrong') })
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from('right') })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    expect((await socket.request({ method: 'GET', path: '/x' })).payload.toString()).toBe('right')
+  })
+
+  it('survives a malformed datagram', async () => {
+    device = fakeDevice((request, reply) => {
+      device!.server.send(Buffer.from([0x00]), 0, 1, 0, '127.0.0.1') // garbage, ignored
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from('ok') })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    expect((await socket.request({ method: 'GET', path: '/x' })).payload.toString()).toBe('ok')
+  })
+
+  it('rejects on timeout and leaves no pending handler', async () => {
+    device = fakeDevice(() => { /* never replies */ })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    await expect(socket.request({ method: 'GET', path: '/x', timeoutMs: 100 })).rejects.toThrow(/timeout/)
+    expect(socket.pendingCount).toBe(0)
+  })
+})
+
+describe('CoapSocket.observe', () => {
+  it('resolves the first response and streams later pushes', async () => {
+    let saved: { token: Buffer, reply: (m: Parameters<typeof encode>[0]) => void } | null = null
+    device = fakeDevice((request, reply) => {
+      saved = { token: request.token, reply }
+      reply({
+        code: CONTENT_2_05,
+        messageId: request.messageId,
+        token: request.token,
+        options: [{ number: CoapOption.Observe, value: uintToBuffer(1) }, { number: CoapOption.MaxAge, value: uintToBuffer(60) }],
+        payload: Buffer.from('first'),
+      })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    const pushes: string[] = []
+    const observation = await socket.observe({ path: '/sys/dev/status', onNotify: m => pushes.push(m.payload.toString()) })
+
+    expect(observation.first.payload.toString()).toBe('first')
+    expect(findOption(observation.first.options, CoapOption.MaxAge)).toBeDefined()
+
+    saved!.reply({ code: CONTENT_2_05, messageId: 99, token: saved!.token, payload: Buffer.from('second') })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(pushes).toEqual(['second'])
+  })
+
+  it('cancel() sends the same token with Observe=1 and stops notifications', async () => {
+    const requests: ReturnType<typeof decode>[] = []
+    let saved: { token: Buffer, reply: (m: Parameters<typeof encode>[0]) => void } | null = null
+    device = fakeDevice((request, reply) => {
+      requests.push(request)
+      const observe = findOption(request.options, CoapOption.Observe)
+      if (observe && observe.value.length > 0) return // cancellation, no reply
+      saved = { token: request.token, reply }
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from('first') })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    const pushes: string[] = []
+    const observation = await socket.observe({ path: '/sys/dev/status', onNotify: m => pushes.push(m.payload.toString()) })
+    observation.cancel()
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // The cancellation carries the same token and Observe = 1.
+    const cancellation = requests.at(-1)!
+    expect(cancellation.token.toString('hex')).toBe(observation.first.token.toString('hex'))
+    expect(findOption(cancellation.options, CoapOption.Observe)!.value.toString('hex')).toBe('01')
+
+    // A push arriving after cancellation must be dropped.
+    saved!.reply({ code: CONTENT_2_05, messageId: 100, token: saved!.token, payload: Buffer.from('late') })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(pushes).toEqual([])
+    expect(socket.pendingCount).toBe(0)
+  })
+})
+```
+
+- [ ] **Step 6: Run to verify it fails**
+
+```bash
+npx vitest run test/coap-socket.test.ts
+```
+
+Expected: FAIL — module not found.
+
+- [ ] **Step 7: Implement `src/airctrl/coap/socket.ts`**
+
+```typescript
+import { createSocket, type Socket } from 'node:dgram'
+import { randomBytes, randomInt } from 'node:crypto'
+import {
+  CoapCode,
+  CoapOption,
+  CoapType,
+  type DecodedCoapMessage,
+  decode,
+  encode,
+  uintToBuffer,
+  uriPathOptions,
+} from './message.js'
+
+const DEFAULT_TIMEOUT_MS = 8000
+
+export interface RequestOptions {
+  method: 'GET' | 'POST'
+  path: string
+  payload?: string | Buffer
+  /** Send the Observe option. Status reads need this even when one-shot. */
+  observe?: boolean
+  timeoutMs?: number
+}
+
+export interface ObserveOptions {
+  path: string
+  onNotify: (message: DecodedCoapMessage) => void
+  onError?: (error: Error) => void
+  timeoutMs?: number
+}
+
+export interface Observation {
+  first: DecodedCoapMessage
+  /** Proactively deregister: same token, Observe = 1. */
+  cancel: () => void
+}
+
+/**
+ * A UDP socket speaking just enough CoAP for Philips devices.
+ *
+ * Responses are matched to requests by TOKEN, not message ID. Observe
+ * notifications reuse the original request's token but carry fresh message IDs,
+ * so message-ID matching would drop every push.
+ */
+export class CoapSocket {
+  private readonly socket: Socket
+  private readonly handlers = new Map<string, (message: DecodedCoapMessage) => void>()
+  private messageId: number
+  private closed = false
+
+  constructor(
+    private readonly host: string,
+    private readonly port: number = 5683,
+  ) {
+    this.messageId = randomInt(0, 0x10000)
+    this.socket = createSocket('udp4')
+    this.socket.on('message', buffer => this.dispatch(buffer))
+    // A socket-level error must not become an unhandled exception; pending
+    // requests fail via their own timeouts.
+    this.socket.on('error', () => {})
+    this.socket.unref()
+  }
+
+  /** Number of outstanding requests and live observations. Used by tests. */
+  get pendingCount(): number {
+    return this.handlers.size
+  }
+
+  private dispatch(buffer: Buffer): void {
+    let message: DecodedCoapMessage
+    try {
+      message = decode(buffer)
+    } catch {
+      return // malformed datagram: ignore, never crash the socket
+    }
+    this.handlers.get(message.token.toString('hex'))?.(message)
+  }
+
+  private nextMessageId(): number {
+    this.messageId = (this.messageId + 1) & 0xFFFF
+    return this.messageId
+  }
+
+  private transmit(
+    method: 'GET' | 'POST',
+    path: string,
+    token: Buffer,
+    observeValue?: number,
+    payload?: string | Buffer,
+  ): void {
+    if (this.closed) throw new Error('socket is closed')
+    const options = uriPathOptions(path)
+    if (observeValue !== undefined) {
+      options.push({ number: CoapOption.Observe, value: uintToBuffer(observeValue) })
+    }
+    this.socket.send(encode({
+      type: CoapType.NonConfirmable,
+      code: method === 'POST' ? CoapCode.POST : CoapCode.GET,
+      messageId: this.nextMessageId(),
+      token,
+      options,
+      payload: payload === undefined ? undefined : Buffer.from(payload as string),
+    }), this.port, this.host)
+  }
+
+  /** One request, one response. */
+  request(options: RequestOptions): Promise<DecodedCoapMessage> {
+    const { method, path, payload, observe = false, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+    return new Promise((resolve, reject) => {
+      const token = randomBytes(4)
+      const key = token.toString('hex')
+
+      const timer = setTimeout(() => {
+        this.handlers.delete(key)
+        reject(new Error(`CoAP timeout after ${timeoutMs}ms for ${method} ${path}`))
+      }, timeoutMs)
+
+      this.handlers.set(key, message => {
+        clearTimeout(timer)
+        this.handlers.delete(key)
+        resolve(message)
+      })
+
+      try {
+        this.transmit(method, path, token, observe ? 0 : undefined, payload)
+      } catch (error) {
+        clearTimeout(timer)
+        this.handlers.delete(key)
+        reject(error as Error)
+      }
+    })
+  }
+
+  /** Register an observation. `onNotify` fires for every push after the first. */
+  async observe(options: ObserveOptions): Promise<Observation> {
+    const { path, onNotify, timeoutMs = DEFAULT_TIMEOUT_MS } = options
+    const token = randomBytes(4)
+    const key = token.toString('hex')
+
+    const first = await new Promise<DecodedCoapMessage>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.handlers.delete(key)
+        reject(new Error(`CoAP observe timeout after ${timeoutMs}ms for ${path}`))
+      }, timeoutMs)
+
+      let settled = false
+      this.handlers.set(key, message => {
+        if (!settled) {
+          settled = true
+          clearTimeout(timer)
+          resolve(message)
+          return
+        }
+        onNotify(message)
+      })
+
+      try {
+        this.transmit('GET', path, token, 0)
+      } catch (error) {
+        clearTimeout(timer)
+        this.handlers.delete(key)
+        reject(error as Error)
+      }
+    })
+
+    return {
+      first,
+      cancel: () => {
+        // Deregister the handler first so a push racing the cancellation is
+        // dropped rather than delivered after the caller has stopped listening.
+        this.handlers.delete(key)
+        if (!this.closed) {
+          try {
+            this.transmit('GET', path, token, 1)
+          } catch {
+            // Socket already gone; the handler is removed either way.
+          }
+        }
+      },
+    }
+  }
+
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.handlers.clear()
+    try {
+      this.socket.close()
+    } catch {
+      // Already closed.
+    }
+  }
+}
+```
+
+- [ ] **Step 8: Run both test files**
+
+```bash
+npx vitest run test/coap-message.test.ts test/coap-socket.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 9: Confirm against real hardware**
+
+```bash
+node scripts/coap-spike.mjs 192.168.20.151
+```
+
+Expected: `codec self-check: PASS`, `[3] status code 2.05 | Max-Age 60`,
+`[4] decrypted 59 keys`, and `[6] after proactive cancel, further pushes: 0`.
+
+- [ ] **Step 10: Confirm no third-party imports crept in**
+
+```bash
+grep -rnE "from '(?!node:|\./|\.\./)" src/airctrl/coap/ || echo 'only node: and relative imports — good'
+```
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/airctrl/coap test/coap-message.test.ts test/coap-socket.test.ts
+git commit -m "Implement minimal CoAP over node:dgram
+
+Replaces the coap npm package. Only what Philips firmware needs: NON
+messages, GET/POST, Uri-Path, Observe and Max-Age. No CON/ACK, no
+block-wise transfer, no server mode, no multicast, and no dependencies.
+
+Responses are matched by token rather than message ID, because observe
+notifications reuse the request token with fresh message IDs.
+
+Gains proactive observe cancellation, which the coap package cannot do
+(coapjs/node-coap#195) and which single-observer-slot firmware needs.
+
+Codec tests assert golden bytes captured from a hardware-verified spike."
+```
+
+---
+
+### Task 3: Define the zod trust boundaries
 
 **Goal:** `src/airctrl/schema.ts` — validation for the two places untrusted data enters: decrypted device payloads and the plugin config block.
 
@@ -597,146 +1362,286 @@ keys would reject any device whose key set differs from the tested one."
 
 ---
 
-### Task 3: Port the CoAP client
+### Task 4: Port the Philips CoAP client
 
-**Goal:** `src/airctrl/client.ts` — one device's CoAP conversation: sync handshake, status read, observe stream, control writes, plaintext info.
+**Goal:** `src/airctrl/client.ts` — the Philips protocol on top of `CoapSocket`: sync handshake, status read, observe stream, control writes, plaintext info.
 
 **Files:**
 - Create: `src/airctrl/client.ts`
 - Create: `test/client.test.ts`
+- Create: `test/helpers/fake-device.ts` (shared scriptable CoAP device, also usable by Task 7)
 
 **Acceptance Criteria:**
 - [ ] `getInfo()` reads plaintext `/sys/dev/info` with no handshake
 - [ ] `connect()` performs the sync handshake and stores the returned client key
-- [ ] `getStatus()` sends the Observe option (required — the device will not answer a plain GET) and returns decrypted state plus `maxAge`
+- [ ] `getStatus()` sends the Observe option (required — the device will not answer a plain GET), returns decrypted state plus `maxAge`, and **cancels the observation** so no lingering registration is left behind
 - [ ] `observe()` yields decrypted status objects as the device pushes them
 - [ ] `setControl()` retries up to 5 times by default, resyncing between attempts, and resolves `false` after exhausting them
-- [ ] All requests set `confirmable: false` (Philips uses non-confirmable NON messages)
-- [ ] Tests run against a local `coap.createServer()`, not the real device
-- [ ] `close()` tears down every open observation
+- [ ] `setControl()` increments the client key before each attempt
+- [ ] Tests run against a local fake device built from our own `encode`, not against the real hardware
+- [ ] `close()` cancels every open observation and closes the socket
+- [ ] The only transport dependency is `CoapSocket` — `client.ts` never imports `node:dgram` directly
 
 **Verify:** `npx vitest run test/client.test.ts` → all tests pass
 
 **Steps:**
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Create the shared fake device helper**
 
-A local CoAP server is the honest way to test this — it exercises the real
-`coap` library rather than a mock of it.
+Built from our own `encode`, so the test suite has no third-party transport and
+full control over what the "device" replies.
+
+```typescript
+// test/helpers/fake-device.ts
+import dgram from 'node:dgram'
+import { type CoapMessage, type DecodedCoapMessage, decode, encode } from '../../src/airctrl/coap/message.js'
+
+export const CONTENT_2_05 = 69 // (2 << 5) | 5
+
+export type Reply = (message: CoapMessage) => void
+export type Handler = (request: DecodedCoapMessage, reply: Reply) => void
+
+export interface FakeDevice {
+  port: number
+  requests: DecodedCoapMessage[]
+  /** Replay a push to the last observer, e.g. to simulate a state change. */
+  push: (payload: string) => void
+  close: () => Promise<void>
+}
+
+/** A scriptable CoAP device on localhost. */
+export async function startFakeDevice(handler: Handler): Promise<FakeDevice> {
+  const server = dgram.createSocket('udp4')
+  const requests: DecodedCoapMessage[] = []
+  let lastObserver: { token: Buffer, reply: Reply } | null = null
+
+  server.on('message', (buffer, remote) => {
+    let request: DecodedCoapMessage
+    try {
+      request = decode(buffer)
+    } catch {
+      return
+    }
+    requests.push(request)
+    const reply: Reply = message => server.send(encode(message), remote.port, remote.address)
+    lastObserver = { token: request.token, reply }
+    handler(request, reply)
+  })
+
+  const port = await new Promise<number>(resolve => {
+    server.bind(0, () => resolve((server.address() as { port: number }).port))
+  })
+
+  return {
+    port,
+    requests,
+    push: (payload: string) => {
+      if (!lastObserver) throw new Error('no observer registered yet')
+      lastObserver.reply({
+        code: CONTENT_2_05,
+        messageId: 0xABCD,
+        token: lastObserver.token,
+        payload: Buffer.from(payload),
+      })
+    },
+    close: () => new Promise<void>(resolve => server.close(() => resolve())),
+  }
+}
+
+/** Uri-Path of a decoded request, e.g. "/sys/dev/status". */
+export function pathOf(request: DecodedCoapMessage): string {
+  return `/${request.options.filter(o => o.number === 11).map(o => o.value.toString()).join('/')}`
+}
+```
+
+- [ ] **Step 2: Write the failing client tests**
 
 ```typescript
 // test/client.test.ts
-import type { Server } from 'node:net'
-import coap from 'coap'
 import { afterEach, describe, expect, it } from 'vitest'
+import { CoapOption, findOption, uintToBuffer } from '../src/airctrl/coap/message.js'
 import { encrypt } from '../src/airctrl/crypto.js'
 import { PhilipsCoapClient } from '../src/airctrl/client.js'
+import { CONTENT_2_05, type FakeDevice, pathOf, startFakeDevice } from './helpers/fake-device.js'
 
-const PORT = 15683
 const CLIENT_KEY = '0DC377BA'
+const statusBody = (reported: Record<string, unknown>) =>
+  encrypt(CLIENT_KEY, JSON.stringify({ state: { reported } }))
 
-let server: Server & { close: (cb?: () => void) => void }
+let device: FakeDevice | null = null
+let client: PhilipsCoapClient | null = null
 
-function startServer(handler: (req: any, res: any) => void) {
-  server = coap.createServer() as never
-  ;(server as any).on('request', handler)
-  return new Promise<void>(resolve => (server as any).listen(PORT, resolve))
-}
-
-afterEach(() => new Promise<void>(resolve => server?.close(() => resolve())))
-
-function statusBody(reported: Record<string, unknown>) {
-  return encrypt(CLIENT_KEY, JSON.stringify({ state: { reported } }))
-}
+afterEach(async () => {
+  client?.close()
+  client = null
+  await device?.close()
+  device = null
+})
 
 describe('PhilipsCoapClient', () => {
   it('reads plaintext /sys/dev/info without a handshake', async () => {
-    await startServer((req, res) => {
-      if (req.url === '/sys/dev/info') res.end(JSON.stringify({ modelid: 'AC4220/12', name: 'Office 1' }))
-    })
-    const client = new PhilipsCoapClient('127.0.0.1', PORT)
-    expect((await client.getInfo()).modelid).toBe('AC4220/12')
-  })
-
-  it('performs the sync handshake and decrypts status', async () => {
-    await startServer((req, res) => {
-      if (req.url === '/sys/dev/sync') return res.end(CLIENT_KEY)
-      if (req.url.startsWith('/sys/dev/status')) {
-        res.setOption('Max-Age', 60)
-        return res.end(statusBody({ D03102: 1, D01S05: 'AC4220/12' }))
+    device = await startFakeDevice((request, reply) => {
+      if (pathOf(request) === '/sys/dev/info') {
+        reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(JSON.stringify({ modelid: 'AC4220/12', name: 'Office 1' })) })
       }
     })
-    const client = new PhilipsCoapClient('127.0.0.1', PORT)
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
+
+    expect((await client.getInfo()).modelid).toBe('AC4220/12')
+    // No handshake was needed.
+    expect(device.requests.map(pathOf)).toEqual(['/sys/dev/info'])
+  })
+
+  it('performs the sync handshake, then decrypts status and reads Max-Age', async () => {
+    device = await startFakeDevice((request, reply) => {
+      const path = pathOf(request)
+      if (path === '/sys/dev/sync') {
+        return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(CLIENT_KEY) })
+      }
+      if (path === '/sys/dev/status') {
+        return reply({
+          code: CONTENT_2_05,
+          messageId: request.messageId,
+          token: request.token,
+          options: [{ number: CoapOption.MaxAge, value: uintToBuffer(60) }],
+          payload: Buffer.from(statusBody({ D03102: 1, D01S05: 'AC4220/12' })),
+        })
+      }
+    })
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
     await client.connect()
+
     const { status, maxAge } = await client.getStatus()
     expect(status.D03102).toBe(1)
+    expect(status.D01S05).toBe('AC4220/12')
     expect(maxAge).toBe(60)
-    client.close()
+  })
+
+  it('sends the Observe option on a status read and cancels it afterwards', async () => {
+    device = await startFakeDevice((request, reply) => {
+      const path = pathOf(request)
+      if (path === '/sys/dev/sync') {
+        return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(CLIENT_KEY) })
+      }
+      const observe = findOption(request.options, CoapOption.Observe)
+      if (path === '/sys/dev/status' && observe?.value.length === 0) {
+        return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(statusBody({ D03102: 1 })) })
+      }
+    })
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
+    await client.connect()
+    await client.getStatus()
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    const statusRequests = device.requests.filter(r => pathOf(r) === '/sys/dev/status')
+    // First registers (Observe = 0, empty value), then deregisters (Observe = 1).
+    expect(findOption(statusRequests[0]!.options, CoapOption.Observe)!.value.length).toBe(0)
+    expect(findOption(statusRequests.at(-1)!.options, CoapOption.Observe)!.value.toString('hex')).toBe('01')
+  })
+
+  it('falls back to a 60s maxAge when the device omits Max-Age', async () => {
+    device = await startFakeDevice((request, reply) => {
+      const path = pathOf(request)
+      if (path === '/sys/dev/sync') return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(CLIENT_KEY) })
+      if (path === '/sys/dev/status') return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(statusBody({ D03102: 1 })) })
+    })
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
+    await client.connect()
+    expect((await client.getStatus()).maxAge).toBe(60)
   })
 
   it('yields pushed updates from the observe stream', async () => {
-    await startServer((req, res) => {
-      if (req.url === '/sys/dev/sync') return res.end(CLIENT_KEY)
-      if (req.url.startsWith('/sys/dev/status')) {
-        res.write(statusBody({ D03102: 1 }))
-        setTimeout(() => res.end(statusBody({ D03102: 0 })), 50)
-      }
+    device = await startFakeDevice((request, reply) => {
+      const path = pathOf(request)
+      if (path === '/sys/dev/sync') return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(CLIENT_KEY) })
+      if (path === '/sys/dev/status') return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(statusBody({ D03102: 1 })) })
     })
-    const client = new PhilipsCoapClient('127.0.0.1', PORT)
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
     await client.connect()
 
     const seen: unknown[] = []
-    for await (const status of client.observe()) {
-      seen.push(status.D03102)
-      if (seen.length === 2) break
-    }
+    const iterator = client.observe()
+    const firstResult = await iterator.next()
+    seen.push((firstResult.value as Record<string, unknown>).D03102)
+
+    device.push(statusBody({ D03102: 0 }))
+    const secondResult = await iterator.next()
+    seen.push((secondResult.value as Record<string, unknown>).D03102)
+
     expect(seen).toEqual([1, 0])
-    client.close()
+    await iterator.return?.(undefined)
   })
 
-  it('resolves false after exhausting retries on a failing control write', async () => {
-    let attempts = 0
-    await startServer((req, res) => {
-      if (req.url === '/sys/dev/sync') return res.end(CLIENT_KEY)
-      if (req.url === '/sys/dev/control') {
-        attempts++
-        return res.end(JSON.stringify({ status: 'failed' }))
-      }
-    })
-    const client = new PhilipsCoapClient('127.0.0.1', PORT)
-    await client.connect()
-    expect(await client.setControl({ D03102: 1 }, { retries: 2, retryDelayMs: 1 })).toBe(false)
-    expect(attempts).toBe(3) // initial + 2 retries
-    client.close()
-  }, 10_000)
-
   it('resolves true when the device reports success', async () => {
-    await startServer((req, res) => {
-      if (req.url === '/sys/dev/sync') return res.end(CLIENT_KEY)
-      if (req.url === '/sys/dev/control') return res.end(JSON.stringify({ status: 'success' }))
+    device = await startFakeDevice((request, reply) => {
+      const path = pathOf(request)
+      if (path === '/sys/dev/sync') return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(CLIENT_KEY) })
+      if (path === '/sys/dev/control') return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(JSON.stringify({ status: 'success' })) })
     })
-    const client = new PhilipsCoapClient('127.0.0.1', PORT)
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
     await client.connect()
     expect(await client.setControl({ D03102: 1 })).toBe(true)
-    client.close()
+  })
+
+  it('resolves false after exhausting retries', async () => {
+    let controlAttempts = 0
+    device = await startFakeDevice((request, reply) => {
+      const path = pathOf(request)
+      if (path === '/sys/dev/sync') return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(CLIENT_KEY) })
+      if (path === '/sys/dev/control') {
+        controlAttempts++
+        return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(JSON.stringify({ status: 'failed' })) })
+      }
+    })
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
+    await client.connect()
+
+    expect(await client.setControl({ D03102: 1 }, { retries: 2, retryDelayMs: 1 })).toBe(false)
+    expect(controlAttempts).toBe(3) // initial + 2 retries
+  }, 15_000)
+
+  it('increments the client key on each control attempt', async () => {
+    const keysSeen: string[] = []
+    device = await startFakeDevice((request, reply) => {
+      const path = pathOf(request)
+      if (path === '/sys/dev/sync') return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(CLIENT_KEY) })
+      if (path === '/sys/dev/control') {
+        keysSeen.push(request.payload.toString().slice(0, 8))
+        return reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(JSON.stringify({ status: 'success' })) })
+      }
+    })
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
+    await client.connect()
+
+    await client.setControl({ D03102: 1 })
+    await client.setControl({ D03102: 0 })
+    // 0DC377BA -> 0DC377BB, then 0DC377BC
+    expect(keysSeen).toEqual(['0DC377BB', '0DC377BC'])
+  })
+
+  it('throws NotConnectedError when a handshake has not happened', async () => {
+    device = await startFakeDevice(() => {})
+    client = new PhilipsCoapClient('127.0.0.1', device.port)
+    await expect(client.getStatus()).rejects.toThrow(/connect\(\)/)
   })
 })
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 3: Run to verify it fails**
 
 ```bash
 npx vitest run test/client.test.ts
 ```
 
-Expected: FAIL — module not found.
+Expected: FAIL — `Cannot find module '../src/airctrl/client.js'`
 
-- [ ] **Step 3: Implement `src/airctrl/client.ts`**
+- [ ] **Step 4: Implement `src/airctrl/client.ts`**
 
 ```typescript
 import { randomBytes } from 'node:crypto'
-import coap from 'coap'
-import { encrypt, decrypt, nextKey } from './crypto.js'
+import { CoapOption, bufferToUint, findOption } from './coap/message.js'
+import { CoapSocket, type Observation } from './coap/socket.js'
+import { decrypt, encrypt, nextKey } from './crypto.js'
 import { DeviceInfoSchema, parseStatusPayload, type DeviceInfo, type DeviceStatus } from './schema.js'
 
 const STATUS_PATH = '/sys/dev/status'
@@ -744,21 +1649,13 @@ const CONTROL_PATH = '/sys/dev/control'
 const SYNC_PATH = '/sys/dev/sync'
 const INFO_PATH = '/sys/dev/info'
 
-const DEFAULT_MAX_AGE = 60
-const REQUEST_TIMEOUT_MS = 8000
+const DEFAULT_MAX_AGE_S = 60
 
 export class NotConnectedError extends Error {
   constructor() {
     super('client key not initialised; call connect() first')
     this.name = 'NotConnectedError'
   }
-}
-
-interface RequestOptions {
-  method: 'GET' | 'POST'
-  pathname: string
-  observe?: boolean
-  body?: string
 }
 
 export interface SetControlOptions {
@@ -769,59 +1666,32 @@ export interface SetControlOptions {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
+/**
+ * The Philips protocol on top of a plain CoAP socket.
+ *
+ * This class owns the encryption handshake and payload shapes; it knows nothing
+ * about UDP. Swapping the transport means touching only CoapSocket.
+ */
 export class PhilipsCoapClient {
+  private readonly socket: CoapSocket
   private clientKey: string | null = null
-  private streams = new Set<{ close?: () => void }>()
+  private observations = new Set<Observation>()
 
-  constructor(
-    private readonly host: string,
-    private readonly port: number = 5683,
-  ) {}
-
-  /**
-   * Philips firmware uses non-confirmable (NON) messages — the Python client
-   * sets aiocoap's `Unreliable` transport tuning, which is the same thing.
-   */
-  private request(options: RequestOptions): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const request = coap.request({
-        hostname: this.host,
-        port: this.port,
-        method: options.method,
-        pathname: options.pathname,
-        confirmable: false,
-        observe: options.observe ?? false,
-      })
-
-      const timer = setTimeout(() => {
-        request.destroy?.()
-        reject(new Error(`CoAP timeout after ${REQUEST_TIMEOUT_MS}ms for ${options.pathname}`))
-      }, REQUEST_TIMEOUT_MS)
-
-      request.on('response', (response: unknown) => {
-        clearTimeout(timer)
-        resolve(response)
-      })
-      request.on('error', (error: Error) => {
-        clearTimeout(timer)
-        reject(error)
-      })
-
-      if (options.body !== undefined) request.write(Buffer.from(options.body))
-      request.end()
-    })
+  constructor(host: string, port = 5683) {
+    this.socket = new CoapSocket(host, port)
   }
 
-  /** Plaintext device identity. Needs no handshake, so it doubles as a discovery probe. */
+  /** Plaintext device identity. No handshake, so this doubles as a discovery probe. */
   async getInfo(): Promise<DeviceInfo> {
-    const response = await this.request({ method: 'GET', pathname: INFO_PATH })
+    const response = await this.socket.request({ method: 'GET', path: INFO_PATH })
     return DeviceInfoSchema.parse(JSON.parse(response.payload.toString()))
   }
 
   /** Exchange a random nonce for the rolling client key. */
   async connect(): Promise<void> {
+    // Four random bytes as uppercase hex, matching the Python client's os.urandom(4).
     const nonce = randomBytes(4).toString('hex').toUpperCase()
-    const response = await this.request({ method: 'POST', pathname: SYNC_PATH, body: nonce })
+    const response = await this.socket.request({ method: 'POST', path: SYNC_PATH, payload: nonce })
     this.clientKey = response.payload.toString().trim()
   }
 
@@ -833,44 +1703,47 @@ export class PhilipsCoapClient {
   /**
    * Read status once.
    *
-   * The Observe option is mandatory even for a one-shot read: Philips devices
-   * only serve this resource through Observe and will not answer a plain GET.
-   * `coap` cannot proactively cancel an observation (coapjs/node-coap#195), so
-   * the stream is torn down instead.
+   * The Observe option is mandatory even here: Philips devices only serve this
+   * resource through Observe and will not answer a plain GET. The registration is
+   * cancelled immediately so no server-side observer slot is left occupied —
+   * which matters on firmware that only supports one observer.
    */
   async getStatus(): Promise<{ status: DeviceStatus, maxAge: number }> {
     this.requireKey()
-    const response = await this.request({ method: 'GET', pathname: STATUS_PATH, observe: true })
-    const status = parseStatusPayload(decrypt(response.payload.toString()))
-    const maxAge = Number(response.headers?.['Max-Age'] ?? DEFAULT_MAX_AGE)
-    response.close?.()
-    return { status, maxAge: Number.isFinite(maxAge) ? maxAge : DEFAULT_MAX_AGE }
+    const observation = await this.socket.observe({ path: STATUS_PATH, onNotify: () => {} })
+    try {
+      const status = parseStatusPayload(decrypt(observation.first.payload.toString()))
+      const maxAgeOption = findOption(observation.first.options, CoapOption.MaxAge)
+      const maxAge = maxAgeOption ? bufferToUint(maxAgeOption.value) : DEFAULT_MAX_AGE_S
+      return { status, maxAge: maxAge > 0 ? maxAge : DEFAULT_MAX_AGE_S }
+    } finally {
+      observation.cancel()
+    }
   }
 
   /** Long-lived push stream. Yields the first response, then every notification. */
   async *observe(): AsyncGenerator<DeviceStatus> {
     this.requireKey()
-    const response = await this.request({ method: 'GET', pathname: STATUS_PATH, observe: true })
-    this.streams.add(response)
 
-    try {
-      yield parseStatusPayload(decrypt(response.payload.toString()))
+    const queue: DeviceStatus[] = []
+    let notify: (() => void) | null = null
+    let failure: Error | null = null
 
-      const queue: DeviceStatus[] = []
-      let notify: (() => void) | null = null
-      let failure: Error | null = null
-      let ended = false
-
-      response.on('data', (chunk: Buffer) => {
+    const observation = await this.socket.observe({
+      path: STATUS_PATH,
+      onNotify: message => {
         try {
-          queue.push(parseStatusPayload(decrypt(chunk.toString())))
+          queue.push(parseStatusPayload(decrypt(message.payload.toString())))
         } catch (error) {
           failure = error as Error
         }
         notify?.()
-      })
-      response.on('error', (error: Error) => { failure = error; notify?.() })
-      response.on('end', () => { ended = true; notify?.() })
+      },
+    })
+    this.observations.add(observation)
+
+    try {
+      yield parseStatusPayload(decrypt(observation.first.payload.toString()))
 
       while (true) {
         if (queue.length > 0) {
@@ -878,13 +1751,14 @@ export class PhilipsCoapClient {
           continue
         }
         if (failure) throw failure
-        if (ended) return
         await new Promise<void>(resolve => { notify = resolve })
         notify = null
       }
     } finally {
-      this.streams.delete(response)
-      response.close?.()
+      // Runs on break, return() and throw, so an abandoned stream always
+      // deregisters rather than leaving the device pushing into nothing.
+      this.observations.delete(observation)
+      observation.cancel()
     }
   }
 
@@ -892,8 +1766,8 @@ export class PhilipsCoapClient {
    * Write control values.
    *
    * A `success` response means the device ACCEPTED the command, not that it
-   * applied it — verified on hardware, where writes to read-only keys still ACK.
-   * Callers must confirm real changes via the observe stream.
+   * applied it — verified on hardware, where writes to read-only keys still
+   * report success. Callers must confirm real changes via the observe stream.
    */
   async setControl(values: Record<string, unknown>, options: SetControlOptions = {}): Promise<boolean> {
     const { retries = 5, retryDelayMs = 500, resync = true } = options
@@ -903,10 +1777,10 @@ export class PhilipsCoapClient {
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       this.clientKey = nextKey(this.requireKey())
-      const response = await this.request({
+      const response = await this.socket.request({
         method: 'POST',
-        pathname: CONTROL_PATH,
-        body: encrypt(this.clientKey, payload),
+        path: CONTROL_PATH,
+        payload: encrypt(this.clientKey, payload),
       })
 
       let accepted = false
@@ -923,46 +1797,56 @@ export class PhilipsCoapClient {
     return false
   }
 
-  /** Tear down every open observation. */
+  /** Cancel every observation and close the socket. */
   close(): void {
-    for (const stream of this.streams) stream.close?.()
-    this.streams.clear()
+    for (const observation of this.observations) observation.cancel()
+    this.observations.clear()
+    this.socket.close()
   }
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [ ] **Step 5: Run to verify it passes**
 
 ```bash
 npx vitest run test/client.test.ts
 ```
 
-Expected: PASS, 5 tests.
+Expected: PASS, 9 tests.
 
-- [ ] **Step 5: Verify against real hardware**
-
-```bash
-node scripts/spike.mjs 192.168.20.151
-```
-
-Expected: all six spike stages report OK.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Verify against real hardware**
 
 ```bash
-git add src/airctrl/client.ts test/client.test.ts
-git commit -m "Port the CoAP client
-
-Tests run against a local coap.createServer() so the real coap library
-is exercised rather than a mock of it.
-
-Status reads must carry the Observe option even when one-shot: Philips
-firmware does not answer a plain GET of /sys/dev/status."
+npm run build
+node scripts/coap-spike.mjs 192.168.20.151
 ```
+
+Expected: `codec self-check: PASS`, `[3] status code 2.05 | Max-Age 60`,
+`[4] decrypted 59 keys`, `[6] after proactive cancel, further pushes: 0`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/airctrl/client.ts test/client.test.ts test/helpers/fake-device.ts
+git commit -m "Port the Philips protocol onto our own CoAP socket
+
+client.ts owns the handshake, encryption and payload shapes; CoapSocket
+owns UDP. Swapping the transport would touch only the latter.
+
+getStatus() cancels its observation once the reply arrives. The Observe
+option is mandatory even for a one-shot read because Philips firmware
+does not answer a plain GET of /sys/dev/status, but leaving the
+registration open would occupy an observer slot on firmware that has
+only one.
+
+Tests script a fake device built from our own encode(), so the suite has
+no third-party transport."
+```
+
 
 ---
 
-### Task 4: Port the device key and model tables
+### Task 5: Port the device key and model tables
 
 **Goal:** `src/device/keys.ts` and `src/device/models.ts` — the capability registry, plus model resolution with family-prefix fallback.
 
@@ -1304,7 +2188,7 @@ speed 3, so exposing them would duplicate the speed ladder."
 
 ---
 
-### Task 5: Build the device coordinator
+### Task 6: Build the device coordinator
 
 **Goal:** `src/device/coordinator.ts` — owns liveness for one device: connect, observe, detect loss, reconnect with backoff, and emit only real changes.
 
@@ -1631,7 +2515,7 @@ for an hour logs twice rather than hundreds of times."
 
 ---
 
-### Task 6: Implement network discovery
+### Task 7: Implement network discovery
 
 **Goal:** `src/airctrl/discovery.ts` — sweep a subnet for Philips devices using the plaintext info endpoint.
 
@@ -1640,11 +2524,14 @@ for an hour logs twice rather than hundreds of times."
 - Create: `test/discovery.test.ts`
 
 **Acceptance Criteria:**
-- [ ] `localSubnets()` returns CIDR strings for non-loopback IPv4 interfaces
-- [ ] `hostsInSubnet('192.168.20.0/24')` yields 254 usable addresses, excluding network and broadcast
+- [ ] `localSubnets()` returns CIDR strings normalised to the network address, excluding loopback and internal interfaces
+- [ ] `hostsInSubnet('192.168.20.0/24')` yields 254 hosts, first `192.168.20.1`, last `192.168.20.254`, excluding network and broadcast
+- [ ] `hostsInSubnet('10.0.0.0/30')` yields exactly `['10.0.0.1', '10.0.0.2']`
 - [ ] `probeHost()` resolves device identity for a responder and `null` for a non-responder
-- [ ] `discover()` caps concurrency and returns only successful probes
-- [ ] Probing uses `/sys/dev/info` and performs no handshake or decryption
+- [ ] `probeHost()` resolves `null` for a CoAP responder that reports no `modelid` (some other device on the network)
+- [ ] `discover()` returns only successful probes, sorted by host
+- [ ] `discover()` never exceeds the requested concurrency
+- [ ] Probing issues exactly one request, to `/sys/dev/info` — no handshake, no decryption
 
 **Verify:** `npx vitest run test/discovery.test.ts` → all tests pass
 
@@ -1654,14 +2541,25 @@ for an hour logs twice rather than hundreds of times."
 
 ```typescript
 // test/discovery.test.ts
-import coap from 'coap'
 import { afterEach, describe, expect, it } from 'vitest'
 import { discover, hostsInSubnet, localSubnets, probeHost } from '../src/airctrl/discovery.js'
+import { CONTENT_2_05, type FakeDevice, pathOf, startFakeDevice } from './helpers/fake-device.js'
 
-const PORT = 15684
-let server: any
+let device: FakeDevice | null = null
 
-afterEach(() => new Promise<void>(resolve => server ? server.close(() => resolve()) : resolve()))
+afterEach(async () => {
+  await device?.close()
+  device = null
+})
+
+/** A fake that answers /sys/dev/info with the given identity. */
+async function deviceReporting(info: Record<string, unknown>): Promise<FakeDevice> {
+  return startFakeDevice((request, reply) => {
+    if (pathOf(request) === '/sys/dev/info') {
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(JSON.stringify(info)) })
+    }
+  })
+}
 
 describe('hostsInSubnet', () => {
   it('yields 254 usable hosts for a /24, excluding network and broadcast', () => {
@@ -1688,34 +2586,54 @@ describe('localSubnets', () => {
 
 describe('probeHost', () => {
   it('identifies a responding Philips device', async () => {
-    server = coap.createServer()
-    server.on('request', (req: any, res: any) => {
-      if (req.url === '/sys/dev/info') {
-        res.end(JSON.stringify({ modelid: 'AC4220/12', name: 'Office 1', device_id: 'abc', swversion: '0.2.3' }))
-      }
-    })
-    await new Promise<void>(resolve => server.listen(PORT, resolve))
+    device = await deviceReporting({ modelid: 'AC4220/12', name: 'Office 1', device_id: 'abc', swversion: '0.2.3' })
 
-    const found = await probeHost('127.0.0.1', PORT, 2000)
-    expect(found).toMatchObject({ host: '127.0.0.1', model: 'AC4220/12', name: 'Office 1' })
+    const found = await probeHost('127.0.0.1', device.port, 2000)
+    expect(found).toMatchObject({ host: '127.0.0.1', model: 'AC4220/12', name: 'Office 1', firmware: '0.2.3' })
   })
 
   it('resolves null for a host that does not answer', async () => {
     expect(await probeHost('127.0.0.1', 15699, 300)).toBeNull()
   })
+
+  it('resolves null for a CoAP responder that is not a Philips device', async () => {
+    // Answers, but reports no modelid — some other CoAP device on the network.
+    device = await deviceReporting({ hello: 'not a purifier' })
+    expect(await probeHost('127.0.0.1', device.port, 2000)).toBeNull()
+  })
+
+  it('probes only /sys/dev/info — no handshake, no decryption', async () => {
+    device = await deviceReporting({ modelid: 'AC4220/12', name: 'Office 1' })
+    await probeHost('127.0.0.1', device.port, 2000)
+    expect(device.requests.map(pathOf)).toEqual(['/sys/dev/info'])
+  })
 })
 
 describe('discover', () => {
   it('returns only hosts that responded', async () => {
-    server = coap.createServer()
-    server.on('request', (req: any, res: any) => {
-      if (req.url === '/sys/dev/info') res.end(JSON.stringify({ modelid: 'AC4220/12', name: 'Office 1' }))
-    })
-    await new Promise<void>(resolve => server.listen(PORT, resolve))
+    device = await deviceReporting({ modelid: 'AC4220/12', name: 'Office 1' })
 
-    const found = await discover({ hosts: ['127.0.0.1', '127.0.0.2'], port: PORT, timeoutMs: 500, concurrency: 2 })
+    const found = await discover({ hosts: ['127.0.0.1', '127.0.0.2'], port: device.port, timeoutMs: 500, concurrency: 2 })
     expect(found).toHaveLength(1)
     expect(found[0]!.model).toBe('AC4220/12')
+  })
+
+  it('caps concurrency at the requested level', async () => {
+    let inFlight = 0
+    let peak = 0
+    device = await startFakeDevice((request, reply) => {
+      if (pathOf(request) !== '/sys/dev/info') return
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      setTimeout(() => {
+        inFlight--
+        reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from(JSON.stringify({ modelid: 'AC4220/12' })) })
+      }, 30)
+    })
+
+    const hosts = Array.from({ length: 12 }, () => '127.0.0.1')
+    await discover({ hosts, port: device.port, timeoutMs: 2000, concurrency: 4 })
+    expect(peak).toBeLessThanOrEqual(4)
   })
 })
 ```
@@ -1873,7 +2791,7 @@ status read per IP."
 
 ---
 
-### Task 7: Map device state to HomeKit services
+### Task 8: Map device state to HomeKit services
 
 **Goal:** `src/accessory.ts` — translate device status into HomeKit characteristics and HomeKit writes into device keys.
 
@@ -2358,7 +3276,7 @@ Three rules come from hardware probing, not the HA registry:
 
 ---
 
-### Task 8: Wire up the dynamic platform
+### Task 9: Wire up the dynamic platform
 
 **Goal:** `src/platform.ts` — discover configured devices, create or restore one accessory each, and prune accessories whose config was removed.
 
@@ -2586,7 +3504,7 @@ takes down the platform or crashes Homebridge."
 
 ---
 
-### Task 9: Build the custom configuration UI
+### Task 10: Build the custom configuration UI
 
 **Goal:** `config.schema.json` plus a custom UI that scans the network, probes a manual IP, and manages the device list — so nothing is ever configured by editing JSON.
 
@@ -2885,7 +3803,7 @@ toggles, and remove."
 
 ---
 
-### Task 10: Deploy to Homebridge and verify on real hardware
+### Task 11: Deploy to Homebridge and verify on real hardware
 
 **Goal:** The plugin runs on the live Homebridge instance and the AC4220/12 appears and responds correctly in HomeKit.
 
@@ -3055,7 +3973,7 @@ npm --prefix /var/lib/homebridge.
 
 ---
 
-### Task 11: Adversarial code review and fixes
+### Task 12: Adversarial code review and fixes
 
 **Goal:** CodeRabbit and Codex both review the full implementation, and every valid finding is fixed or explicitly dismissed with a reason.
 

@@ -18,6 +18,42 @@ Existing Homebridge plugins for these devices shell out to the Python
 `aioairctrl` library. This plugin deliberately does not: the protocol is ported
 to TypeScript and hosted here, so the plugin has no runtime outside Node.
 
+## Differentiation
+
+The closest existing plugin is
+[`homebridge-philips-air-purifier-complete`](https://github.com/MaddogWarner/homebridge-philips-air-purifier-complete)
+(v3.3.1). It vendors the Python `aioairctrl` package inside the npm tarball —
+including `aioairctrl/coap/client.py` and an `aiocoap_monkeypatch.py` — and drives
+it from a single CommonJS `index.js` through a `philips_air_api.py` bridge.
+
+This plugin is a different thing, not a reskin:
+
+| | `…-purifier-complete` v3.3.1 | This plugin |
+|---|---|---|
+| Runtime requirements | Node **and Python 3.11+** | Node only |
+| Protocol implementation | vendored Python `aioairctrl`, called out-of-process | native TypeScript, in-process |
+| CoAP layer | `aiocoap` plus a monkeypatch module | ~200 own lines over `node:dgram`, no patching |
+| Third-party protocol deps | `aiocoap`, `pycryptodomex` (via Python) | none |
+| Install scripts | `preinstall.sh` + `postinstall.sh` | **none** |
+| Language / structure | one CommonJS `index.js` | TypeScript ESM, layered modules |
+| Tests | Python `unittest` | Vitest against payloads captured from real hardware |
+
+Two of those rows are correctness matters, not taste:
+
+- **Install scripts.** Homebridge Verified requires that a plugin *"must not
+  execute post-install scripts that modify the users' system in any way."* A
+  plugin shipping `preinstall.sh`/`postinstall.sh` to provision Python cannot
+  satisfy that. This plugin runs no install scripts at all.
+- **No out-of-process bridge.** Spawning a Python interpreter per operation adds
+  startup latency, a second failure domain, and a dependency on whatever Python
+  the user's Homebridge host happens to have. Keeping the protocol in-process
+  removes all three, and lets the CoAP observe stream stay open as a long-lived
+  socket rather than being marshalled across a process boundary.
+
+Because the observe stream is what makes state updates push-driven rather than
+polled, owning the transport in-process is what makes the HomeKit experience
+responsive.
+
 ## Target environment
 
 Fixed by the deployment target (Homebridge on Unraid at `192.168.20.21:8581`):
