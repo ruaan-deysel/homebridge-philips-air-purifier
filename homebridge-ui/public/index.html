@@ -26,7 +26,16 @@
 <h5 class="mt-3">Configured devices</h5>
 <div id="configured"></div>
 
-<script>
+<script type="module">
+  import {
+    addDeviceToConfig,
+    createConfigMutator,
+    deviceTitle,
+    ensureConfig,
+    removeDeviceFromConfig,
+    setDeviceToggle,
+  } from './config-ops.js'
+
   const statusEl = document.getElementById('status')
   const foundEl = document.getElementById('found')
   const configuredEl = document.getElementById('configured')
@@ -68,12 +77,7 @@
   }
 
   async function currentConfig() {
-    const blocks = await homebridge.getPluginConfig()
-    if (blocks.length === 0) {
-      blocks.push({ platform: 'PhilipsAir', name: 'Philips Air', devices: [] })
-    }
-    if (!Array.isArray(blocks[0].devices)) blocks[0].devices = []
-    return blocks
+    return ensureConfig(await homebridge.getPluginConfig())
   }
 
   async function saveConfig(blocks) {
@@ -81,35 +85,10 @@
     await homebridge.savePluginConfig()
   }
 
-  let configMutation = Promise.resolve()
-  function mutateConfig(mutator) {
-    const operation = configMutation.then(async () => {
-      const blocks = await currentConfig()
-      if (mutator(blocks) === false) return false
-      await saveConfig(blocks)
-      return true
-    })
-    configMutation = operation.catch(() => {})
-    return operation
-  }
-
-  function deviceTitle(device) {
-    return device.name || device.model || device.host
-  }
+  const mutateConfig = createConfigMutator(currentConfig, saveConfig)
 
   async function addDevice(device) {
-    const added = await mutateConfig(blocks => {
-      if (blocks[0].devices.some(existing => existing.host === device.host)) return false
-      blocks[0].devices.push({
-        host: device.host,
-        name: device.name || device.model,
-        model: device.model,
-        exposeLight: true,
-        exposeSleepSwitch: false,
-        exposeAutoPlusSwitch: false,
-        exposeBeepSwitch: false,
-      })
-    })
+    const added = await mutateConfig(blocks => addDeviceToConfig(blocks, device))
     if (!added) {
       say(`${device.host} is already configured.`, 'warning')
       return false
@@ -125,11 +104,7 @@
     input.type = 'checkbox'
     input.checked = checked
     input.addEventListener('change', () => void runBusy(async () => {
-      await mutateConfig(blocks => {
-        const device = blocks[0].devices.find(candidate => candidate.host === host)
-        if (!device) throw new Error(`${host} is no longer configured.`)
-        device[key] = input.checked
-      })
+      await mutateConfig(blocks => setDeviceToggle(blocks, host, key, input.checked))
       say('Saved. Restart Homebridge to apply.', 'success')
     }, 'Could not save the setting.'))
     wrapper.append(input, ` ${label}`)
@@ -150,11 +125,7 @@
       const remove = textElement('button', 'btn btn-sm btn-danger', 'Remove')
       remove.type = 'button'
       remove.addEventListener('click', () => void runBusy(async () => {
-        const removed = await mutateConfig(blocks => {
-          const index = blocks[0].devices.findIndex(candidate => candidate.host === device.host)
-          if (index === -1) return false
-          blocks[0].devices.splice(index, 1)
-        })
+        const removed = await mutateConfig(blocks => removeDeviceFromConfig(blocks, device.host))
         if (!removed) {
           say(`${device.host} is already removed.`, 'warning')
           await renderConfigured()

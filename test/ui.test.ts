@@ -3,6 +3,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { RequestError } from '@homebridge/plugin-ui-utils'
 import { probeRequest, scanRequest } from '../homebridge-ui/server.js'
 import { hostsInSubnet, localSubnets } from '../src/airctrl/discovery.js'
+import {
+  addDeviceToConfig,
+  createConfigMutator,
+  deviceTitle,
+  ensureConfig,
+  removeDeviceFromConfig,
+  setDeviceToggle,
+} from '../homebridge-ui/public/config-ops.js'
 
 const root = new URL('../', import.meta.url)
 
@@ -74,6 +82,125 @@ describe('custom UI server', () => {
       hostsInSubnet,
       localSubnets: () => ['192.168.1.0/30'],
     })).rejects.toBeInstanceOf(RequestError)
+  })
+})
+
+describe('config-ops (browser config logic)', () => {
+  it('ensureConfig creates the platform block and devices array when missing', () => {
+    const blocks: any[] = []
+    const result = ensureConfig(blocks)
+    expect(result).toBe(blocks)
+    expect(blocks).toEqual([{ platform: 'PhilipsAir', name: 'Philips Air', devices: [] }])
+  })
+
+  it('ensureConfig normalizes a non-array devices field', () => {
+    const blocks: any[] = [{ platform: 'PhilipsAir', name: 'Philips Air' }]
+    ensureConfig(blocks)
+    expect(blocks[0].devices).toEqual([])
+  })
+
+  it('deviceTitle prefers name, then model, then host', () => {
+    expect(deviceTitle({ host: 'h', model: 'm', name: 'n' })).toBe('n')
+    expect(deviceTitle({ host: 'h', model: 'm' })).toBe('m')
+    expect(deviceTitle({ host: 'h' })).toBe('h')
+  })
+
+  it('addDeviceToConfig adds a new device with default toggles', () => {
+    const blocks = ensureConfig([])
+    const added = addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12', name: 'Office' })
+    expect(added).toBe(true)
+    expect(blocks[0].devices).toEqual([{
+      host: '192.168.1.20',
+      name: 'Office',
+      model: 'AC4220/12',
+      exposeLight: true,
+      exposeSleepSwitch: false,
+      exposeAutoPlusSwitch: false,
+      exposeBeepSwitch: false,
+    }])
+  })
+
+  it('addDeviceToConfig refuses a duplicate host', () => {
+    const blocks = ensureConfig([])
+    addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12' })
+    const added = addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12', name: 'Duplicate' })
+    expect(added).toBe(false)
+    expect(blocks[0].devices).toHaveLength(1)
+  })
+
+  it('removeDeviceFromConfig removes a configured device and reports success', () => {
+    const blocks = ensureConfig([])
+    addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12' })
+    const removed = removeDeviceFromConfig(blocks, '192.168.1.20')
+    expect(removed).toBe(true)
+    expect(blocks[0].devices).toHaveLength(0)
+  })
+
+  it('removeDeviceFromConfig reports failure for an unknown host', () => {
+    const blocks = ensureConfig([])
+    expect(removeDeviceFromConfig(blocks, '192.168.1.20')).toBe(false)
+  })
+
+  it('setDeviceToggle flips a per-device toggle', () => {
+    const blocks = ensureConfig([])
+    addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12' })
+    setDeviceToggle(blocks, '192.168.1.20', 'exposeSleepSwitch', true)
+    expect(blocks[0].devices[0].exposeSleepSwitch).toBe(true)
+  })
+
+  it('setDeviceToggle throws for a host that is no longer configured', () => {
+    const blocks = ensureConfig([])
+    expect(() => setDeviceToggle(blocks, '192.168.1.20', 'exposeSleepSwitch', true))
+      .toThrow('192.168.1.20 is no longer configured.')
+  })
+
+  it('createConfigMutator serializes concurrent mutations against a shared store', async () => {
+    let stored: any[] = [{ platform: 'PhilipsAir', name: 'Philips Air', devices: [] }]
+    const loadCalls: number[] = []
+    let loadSequence = 0
+
+    const load = vi.fn(async () => {
+      const id = ++loadSequence
+      loadCalls.push(id)
+      // Simulate the async round-trip to the homebridge UI host getting config.
+      await new Promise(resolve => setTimeout(resolve, 5))
+      return JSON.parse(JSON.stringify(stored))
+    })
+    const save = vi.fn(async (blocks: any[]) => {
+      await new Promise(resolve => setTimeout(resolve, 5))
+      stored = blocks
+    })
+
+    const mutateConfig = createConfigMutator(load, save)
+
+    const [addedA, addedB] = await Promise.all([
+      mutateConfig(blocks => addDeviceToConfig(blocks, { host: '10.0.0.1', model: 'A' })),
+      mutateConfig(blocks => addDeviceToConfig(blocks, { host: '10.0.0.2', model: 'B' })),
+    ])
+
+    expect(addedA).toBe(true)
+    expect(addedB).toBe(true)
+    // Both devices must be present: had the two mutations raced against a
+    // stale read, the second save would have clobbered the first.
+    expect(stored[0].devices.map((d: any) => d.host).sort()).toEqual(['10.0.0.1', '10.0.0.2'])
+    expect(save).toHaveBeenCalledTimes(2)
+  })
+
+  it('createConfigMutator keeps later mutations running after an earlier one throws', async () => {
+    let stored: any[] = [{ platform: 'PhilipsAir', name: 'Philips Air', devices: [] }]
+    const load = vi.fn(async () => JSON.parse(JSON.stringify(stored)))
+    const save = vi.fn(async (blocks: any[]) => {
+      stored = blocks
+    })
+    const mutateConfig = createConfigMutator(load, save)
+
+    await expect(mutateConfig(() => {
+      throw new Error('boom')
+    })).rejects.toThrow('boom')
+
+    const added = await mutateConfig(blocks => addDeviceToConfig(blocks, { host: '10.0.0.1', model: 'A' }))
+    expect(added).toBe(true)
+    expect(stored[0].devices).toHaveLength(1)
   })
 })
 
