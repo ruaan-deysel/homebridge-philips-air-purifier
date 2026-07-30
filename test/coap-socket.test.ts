@@ -185,6 +185,34 @@ describe('CoapSocket.observe', () => {
     expect(socket.pendingCount).toBe(0)
   })
 
+  it.each(['synchronous', 'asynchronous'] as const)('reports %s cancellation send failures', async (mode) => {
+    device = fakeDevice((request, reply) => {
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    const errors: Error[] = []
+    const observation = await socket.observe({
+      path: '/status',
+      onNotify: () => {},
+      onError: error => errors.push(error),
+    })
+
+    const underlying = (socket as unknown as { socket: { send: (...args: unknown[]) => void } }).socket
+    underlying.send = (...args) => {
+      const error = new Error(`${mode} send failure`)
+      if (mode === 'synchronous') throw error
+      const callback = args.at(-1)
+      if (typeof callback === 'function') callback(error)
+    }
+
+    observation.cancel()
+
+    expect(errors.map(error => error.message)).toEqual([`${mode} send failure`])
+    expect(socket.pendingCount).toBe(0)
+  })
+
   it('propagates a socket-level error to a live observation onError', async () => {
     device = fakeDevice((request, reply) => {
       reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from('first') })

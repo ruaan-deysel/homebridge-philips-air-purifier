@@ -92,6 +92,7 @@ export class CoapSocket {
     token: Buffer,
     observeValue?: number,
     payload?: string | Buffer,
+    onError?: (error: Error) => void,
   ): void {
     if (this.closed) throw new Error('socket is closed')
     const options = uriPathOptions(path)
@@ -109,7 +110,10 @@ export class CoapSocket {
       if (!error) return
       const key = token.toString('hex')
       const pending = this.pending.get(key)
-      if (!pending) return
+      if (!pending) {
+        onError?.(error)
+        return
+      }
       clearTimeout(pending.timer)
       this.handlers.delete(key)
       this.pending.delete(key)
@@ -196,9 +200,9 @@ export class CoapSocket {
         this.observers.delete(key)
         if (!this.closed) {
           try {
-            this.transmit('GET', path, token, 1)
-          } catch {
-            // Socket already gone; the handler is removed either way.
+            this.transmit('GET', path, token, 1, undefined, onError)
+          } catch (error) {
+            onError?.(error as Error)
           }
         }
       },
