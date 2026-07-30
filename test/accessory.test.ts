@@ -90,6 +90,19 @@ describe('PhilipsAirAccessory', () => {
     expect(accessory.getServiceById(Service.Switch, 'sleep')).toBeDefined()
     expect(accessory.getServiceById(Service.Switch, 'auto-plus')).toBeDefined()
     expect(accessory.getServiceById(Service.Switch, 'beep')).toBeDefined()
+    expect(purifier.isPrimaryService).toBe(true)
+    expect(purifier.linkedServices).toEqual(expect.arrayContaining([
+      accessory.getService(Service.AirQualitySensor),
+      accessory.getService(Service.TemperatureSensor),
+      accessory.getService(Service.HumiditySensor),
+      accessory.getServiceById(Service.FilterMaintenance, 'pre-filter'),
+      accessory.getServiceById(Service.FilterMaintenance, 'nano-protect'),
+      accessory.getServiceById(Service.Lightbulb, 'lamp'),
+      accessory.getServiceById(Service.Switch, 'sleep'),
+      accessory.getServiceById(Service.Switch, 'auto-plus'),
+      accessory.getServiceById(Service.Switch, 'beep'),
+    ]))
+    expect(purifier.linkedServices).toHaveLength(9)
   })
 
   it('makes every device-backed read fail with No Response while unavailable', async () => {
@@ -157,6 +170,13 @@ describe('PhilipsAirAccessory', () => {
     await accessory.getServiceById(Service.Switch, 'beep')!
       .getCharacteristic(Characteristic.On).handleSetRequest(true)
     expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen3Key.BEEP]: 100 })
+
+    await accessory.getServiceById(Service.Switch, 'sleep')!
+      .getCharacteristic(Characteristic.On).handleSetRequest(false)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({
+      [Gen3Key.POWER]: 1,
+      [Gen3Key.MODE_B]: 0,
+    })
     expect(coordinator.status![Gen3Key.LAMP_MODE]).toBe(0)
     expect(coordinator.status![Gen3Key.BEEP]).toBe(100)
   })
@@ -178,6 +198,24 @@ describe('PhilipsAirAccessory', () => {
 
     coordinator.publish({ [Gen3Key.MODE_B]: 2 })
 
+    expect(update).toHaveBeenCalledOnce()
+    expect(update).toHaveBeenCalledWith(40)
+  })
+
+  it('waits for a fresh status event after availability recovers', () => {
+    const { accessory, coordinator } = setup()
+    const speed = accessory.getService(Service.AirPurifier)!
+      .getCharacteristic(Characteristic.RotationSpeed)
+    const update = vi.spyOn(speed, 'updateValue')
+
+    coordinator.setAvailable(false)
+    update.mockClear()
+    coordinator.status = { ...coordinator.status, [Gen3Key.MODE_B]: 4 }
+    coordinator.setAvailable(true)
+
+    expect(update).not.toHaveBeenCalled()
+
+    coordinator.publish({ [Gen3Key.MODE_B]: 2 })
     expect(update).toHaveBeenCalledOnce()
     expect(update).toHaveBeenCalledWith(40)
   })

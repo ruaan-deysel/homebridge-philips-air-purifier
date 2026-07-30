@@ -66,6 +66,8 @@ export class PhilipsAirAccessory {
       ?? accessory.addService(S.AirPurifier, accessory.displayName)
     this.airQuality = accessory.getService(S.AirQualitySensor)
       ?? accessory.addService(S.AirQualitySensor, `${accessory.displayName} Air Quality`)
+    this.purifier.setPrimaryService()
+    this.purifier.addLinkedService(this.airQuality)
 
     const active = this.purifier.getCharacteristic(C.Active)
     const currentState = this.purifier.getCharacteristic(C.CurrentAirPurifierState)
@@ -120,6 +122,7 @@ export class PhilipsAirAccessory {
     if (status && Gen3Key.TEMPERATURE in status && !model.unavailableSensors.includes(Gen3Key.TEMPERATURE)) {
       this.temperature = accessory.getService(S.TemperatureSensor)
         ?? accessory.addService(S.TemperatureSensor, `${accessory.displayName} Temperature`)
+      this.purifier.addLinkedService(this.temperature)
       this.onGet(
         this.temperature.getCharacteristic(C.CurrentTemperature),
         device => temperatureFromRaw(device[Gen3Key.TEMPERATURE]),
@@ -132,6 +135,7 @@ export class PhilipsAirAccessory {
     if (status && Gen3Key.HUMIDITY in status && !model.unavailableSensors.includes(Gen3Key.HUMIDITY)) {
       this.humidity = accessory.getService(S.HumiditySensor)
         ?? accessory.addService(S.HumiditySensor, `${accessory.displayName} Humidity`)
+      this.purifier.addLinkedService(this.humidity)
       this.onGet(
         this.humidity.getCharacteristic(C.CurrentRelativeHumidity),
         device => this.number(device[Gen3Key.HUMIDITY]),
@@ -144,6 +148,7 @@ export class PhilipsAirAccessory {
     if (status && (Gen3Key.FILTER_PREFILTER in status || Gen3Key.FILTER_PREFILTER_TOTAL in status)) {
       this.preFilter = accessory.getServiceById(S.FilterMaintenance, 'pre-filter')
         ?? accessory.addService(S.FilterMaintenance, 'Pre-Filter', 'pre-filter')
+      this.purifier.addLinkedService(this.preFilter)
       this.wireFilter(this.preFilter, Gen3Key.FILTER_PREFILTER, Gen3Key.FILTER_PREFILTER_TOTAL)
     } else {
       const cached = accessory.getServiceById(S.FilterMaintenance, 'pre-filter')
@@ -153,6 +158,7 @@ export class PhilipsAirAccessory {
     if (status && (Gen3Key.FILTER_NANOPROTECT in status || Gen3Key.FILTER_NANOPROTECT_TOTAL in status)) {
       this.nanoFilter = accessory.getServiceById(S.FilterMaintenance, 'nano-protect')
         ?? accessory.addService(S.FilterMaintenance, 'NanoProtect Filter', 'nano-protect')
+      this.purifier.addLinkedService(this.nanoFilter)
       this.wireFilter(this.nanoFilter, Gen3Key.FILTER_NANOPROTECT, Gen3Key.FILTER_NANOPROTECT_TOTAL)
     } else {
       const cached = accessory.getServiceById(S.FilterMaintenance, 'nano-protect')
@@ -162,6 +168,7 @@ export class PhilipsAirAccessory {
     const cachedLight = accessory.getServiceById(S.Lightbulb, 'lamp')
     if (config.exposeLight && model.lights.includes(Gen3Key.LAMP_MODE)) {
       this.light = cachedLight ?? accessory.addService(S.Lightbulb, 'Lamp', 'lamp')
+      this.purifier.addLinkedService(this.light)
       const on = this.light.getCharacteristic(C.On)
       this.onGet(on, device => lampFromValue(device[Gen3Key.LAMP_MODE]))
       on.onSet(value => this.write({ [Gen3Key.LAMP_MODE]: lampValue(Boolean(value)) }))
@@ -172,11 +179,12 @@ export class PhilipsAirAccessory {
     const cachedSleep = accessory.getServiceById(S.Switch, 'sleep')
     if (config.exposeSleepSwitch && this.model.presetModes.sleep) {
       this.sleep = cachedSleep ?? accessory.addService(S.Switch, 'Sleep Mode', 'sleep')
+      this.purifier.addLinkedService(this.sleep)
       const on = this.sleep.getCharacteristic(C.On)
       this.onGet(on, device => booleanFromValue(device[this.power.key]) && this.mode(device) === 17)
       on.onSet(value => this.write(value
         ? this.model.presetModes.sleep!
-        : { [this.power.key]: this.power.off }))
+        : this.model.presetModes.auto!))
     } else if (cachedSleep) {
       accessory.removeService(cachedSleep)
     }
@@ -184,6 +192,7 @@ export class PhilipsAirAccessory {
     const cachedAutoPlus = accessory.getServiceById(S.Switch, 'auto-plus')
     if (config.exposeAutoPlusSwitch && model.switches.includes(Gen3Key.AUTO_PLUS_AI)) {
       this.autoPlus = cachedAutoPlus ?? accessory.addService(S.Switch, 'Auto Plus AI', 'auto-plus')
+      this.purifier.addLinkedService(this.autoPlus)
       const on = this.autoPlus.getCharacteristic(C.On)
       this.onGet(on, device => booleanFromValue(device[Gen3Key.AUTO_PLUS_AI]))
       on.onSet(value => this.write({ [Gen3Key.AUTO_PLUS_AI]: booleanValue(Boolean(value)) }))
@@ -194,6 +203,7 @@ export class PhilipsAirAccessory {
     const cachedBeep = accessory.getServiceById(S.Switch, 'beep')
     if (config.exposeBeepSwitch && model.switches.includes(Gen3Key.BEEP)) {
       this.beep = cachedBeep ?? accessory.addService(S.Switch, 'Beep', 'beep')
+      this.purifier.addLinkedService(this.beep)
       const on = this.beep.getCharacteristic(C.On)
       this.onGet(on, device => beepFromValue(device[Gen3Key.BEEP]))
       on.onSet(value => this.write({ [Gen3Key.BEEP]: beepValue(Boolean(value)) }))
@@ -206,8 +216,7 @@ export class PhilipsAirAccessory {
       if (coordinator.available) this.updateCharacteristics(next)
     })
     coordinator.on('availability', (available: boolean) => {
-      if (available && coordinator.status) this.updateCharacteristics(coordinator.status)
-      else if (!available) this.markUnavailable()
+      if (!available) this.markUnavailable()
     })
 
     if (status) this.updateInformation(status)
