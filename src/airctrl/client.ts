@@ -42,6 +42,8 @@ export class PhilipsCoapClient {
   private readonly observationFailures = new Map<Observation, (error: Error) => void>()
   private clientKey?: string
   private closed = false
+  /** Serialises {@link setControl}: the rolling key must advance one write at a time. */
+  private controlChain: Promise<unknown> = Promise.resolve()
 
   constructor(host: string, port = 5683) {
     this.socket = new CoapSocket(host, port)
@@ -167,9 +169,29 @@ export class PhilipsCoapClient {
     }
   }
 
+  /**
+   * Control writes advance a rolling key, so two concurrent writes (HAP sends Active and
+   * RotationSpeed as one PUT, invoking both onSet handlers at once) would emit K+1 and K+2
+   * as separate NON datagrams that UDP may reorder — the device then rejects the stale one.
+   * Queue them instead. A rejected write never poisons the chain, and close() still lands:
+   * the queued call's own requireOpen() rejects it.
+   * ponytail: each queued write gets its own budgetMs from the moment it starts, so a
+   * device that burns the full ~6s can push the second write past HAP's 10s timeout.
+   * Acceptable — that device is already failing. Share a deadline if it ever matters.
+   */
   async setControl(
     values: Record<string, unknown>,
     options: SetControlOptions = {},
+  ): Promise<boolean> {
+    this.requireOpen()
+    const write = this.controlChain.then(() => this.writeControl(values, options))
+    this.controlChain = write.catch(() => {})
+    return write
+  }
+
+  private async writeControl(
+    values: Record<string, unknown>,
+    options: SetControlOptions,
   ): Promise<boolean> {
     this.requireOpen()
     const {

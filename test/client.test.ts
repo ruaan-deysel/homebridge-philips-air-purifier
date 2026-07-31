@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PhilipsCoapClient, NotConnectedError } from '../src/airctrl/client.js'
 import { decrypt, encrypt } from '../src/airctrl/crypto.js'
-import { CoapOption, bufferToUint } from '../src/airctrl/coap/message.js'
+import { CoapOption, bufferToUint, type DecodedCoapMessage } from '../src/airctrl/coap/message.js'
 import type { CoapSocket, Observation } from '../src/airctrl/coap/socket.js'
 import { startFakeDevice, pathOf, type FakeDevice } from './helpers/fake-device.js'
 
@@ -24,6 +24,39 @@ describe('PhilipsCoapClient', () => {
     devices.push(device)
     clients.push(client)
     return { device, client }
+  }
+
+  /** A client whose control writes take 10ms, so concurrent writes would overlap. */
+  async function slowControlClient(): Promise<{
+    client: PhilipsCoapClient
+    control: { keys: string[], maxInFlight: number }
+  }> {
+    const client = new PhilipsCoapClient('127.0.0.1', 9999)
+    clients.push(client)
+    const socket = (client as unknown as { socket: CoapSocket }).socket
+    const control = { keys: [] as string[], maxInFlight: 0 }
+    let inFlight = 0
+    const reply = (payload: string): DecodedCoapMessage => ({
+      type: 1,
+      code: 69,
+      messageId: 1,
+      token: Buffer.alloc(0),
+      options: [],
+      payload: Buffer.from(payload),
+    })
+    vi.spyOn(socket, 'request').mockImplementation(async options => {
+      if (options.path === '/sys/dev/sync') return reply('0DC377BA')
+      inFlight++
+      control.maxInFlight = Math.max(control.maxInFlight, inFlight)
+      control.keys.push(String(options.payload).slice(0, 8))
+      try {
+        await new Promise(resolve => setTimeout(resolve, 10))
+        return reply(JSON.stringify({ status: 'success' }))
+      } finally {
+        inFlight--
+      }
+    })
+    return { client, control }
   }
 
   it('reads plaintext device info without syncing', async () => {
@@ -241,6 +274,48 @@ describe('PhilipsCoapClient', () => {
     await client.setControl({ D03102: 1 })
     await client.setControl({ D03102: 0 })
     expect(keys).toEqual(['0DC377BB', '0DC377BC'])
+  })
+
+  it('serialises concurrent control writes so the rolling key cannot race', async () => {
+    // HAP sends Active + RotationSpeed as one PUT and invokes both onSet handlers at
+    // once. Unserialised, the two writes emit K+1 and K+2 as separate NON datagrams
+    // that UDP may reorder, and the device rejects the stale one.
+    const { client, control } = await slowControlClient()
+    await client.connect()
+
+    const results = await Promise.all([
+      client.setControl({ D03102: 1 }),
+      client.setControl({ D0310C: 2 }),
+    ])
+
+    expect(results).toEqual([true, true])
+    expect(control.maxInFlight).toBe(1)
+    expect(control.keys).toEqual(['0DC377BB', '0DC377BC'])
+  })
+
+  it('keeps the control queue usable after a queued write rejects', async () => {
+    // A rejected write must not poison the chain for every later write.
+    const { client, control } = await slowControlClient()
+
+    await expect(client.setControl({ D03102: 1 })).rejects.toThrow(NotConnectedError)
+    await client.connect()
+
+    await expect(client.setControl({ D0310C: 2 })).resolves.toBe(true)
+    expect(control.maxInFlight).toBe(1)
+  })
+
+  it('lets close() land while a control write is queued behind another', async () => {
+    const { client } = await slowControlClient()
+    await client.connect()
+
+    const first = client.setControl({ D03102: 1 })
+    const second = client.setControl({ D0310C: 2 })
+    client.close()
+
+    // Neither call hangs: the in-flight one notices the close on its way out and the
+    // queued one rejects when its turn comes.
+    await expect(first).rejects.toThrow(/client closed/)
+    await expect(second).rejects.toThrow(/client closed/)
   })
 
   it('requires connect before encrypted operations', async () => {
