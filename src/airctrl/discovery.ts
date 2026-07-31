@@ -28,6 +28,15 @@ function ipv4ToInt(address: string): number {
   return octets.reduce((value, octet) => ((value << 8) | Number(octet)) >>> 0, 0)
 }
 
+function isIpv4(address: string): boolean {
+  try {
+    ipv4ToInt(address)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function intToIpv4(value: number): string {
   return [
     value >>> 24,
@@ -122,9 +131,19 @@ export async function discover(options: DiscoverOptions = {}): Promise<Discovere
   }
 
   const hosts = options.hosts
-    ?? (options.subnet
+    ? options.hosts.filter(isIpv4)
+    : (options.subnet
       ? [...hostsInSubnet(options.subnet)]
-      : localSubnets().flatMap(cidr => [...hostsInSubnet(cidr)]))
+      : localSubnets().flatMap(cidr => {
+        try {
+          return [...hostsInSubnet(cidr)]
+        } catch (error) {
+          // One oversized interface (docker0 /16, an APIPA /16, ...) must not
+          // abort the whole scan; sweep every other subnet instead.
+          console.warn(`[philips-air] skipping subnet ${cidr}: ${(error as Error).message}`)
+          return []
+        }
+      }))
   const found: DiscoveredDevice[] = []
   let next = 0
 

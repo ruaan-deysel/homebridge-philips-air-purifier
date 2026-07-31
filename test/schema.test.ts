@@ -5,7 +5,9 @@ import { DeviceInfoSchema, PluginConfigSchema, parseStatusPayload } from '../src
 describe('parseStatusPayload', () => {
   it('extracts state.reported and preserves every key', () => {
     const reported = parseStatusPayload(JSON.stringify({ state: { reported: fixture } }))
-    expect(Object.keys(reported)).toHaveLength(59)
+    // Assert the actual invariant — every fixture key survives, none invented —
+    // rather than a hard-coded count that breaks whenever the fixture is regenerated.
+    expect(new Set(Object.keys(reported))).toEqual(new Set(Object.keys(fixture)))
     expect(reported.D01S05).toBe('AC4220/12')
     expect(reported.D03224).toBe(284)
   })

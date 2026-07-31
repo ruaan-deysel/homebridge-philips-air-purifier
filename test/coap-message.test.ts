@@ -94,6 +94,24 @@ describe('decode', () => {
     expect(decoded.options[0]!.value.length).toBe(length)
   })
 
+  it.each([13, 268, 269, 1000])('round-trips an option delta of %i via the extension nibbles', (delta) => {
+    // Two options: number 0 (delta 0) and number `delta` (delta = delta - 0),
+    // so the second option's delta nibble exercises the same 13/14 escapes
+    // already covered above for option length.
+    const decoded = decode(encode({
+      code: CoapCode.GET,
+      messageId: 1,
+      options: [
+        { number: 0, value: Buffer.alloc(0) },
+        { number: delta, value: Buffer.from('x') },
+      ],
+    }))
+    expect(decoded.options).toHaveLength(2)
+    expect(decoded.options[0]!.number).toBe(0)
+    expect(decoded.options[1]!.number).toBe(delta)
+    expect(decoded.options[1]!.value.toString()).toBe('x')
+  })
+
   it('parses a 2.05 Content response code', () => {
     const decoded = decode(encode({ code: 69, messageId: 1 })) // 2.05 = (2 << 5) | 5
     expect(decoded.code).toBe(69)

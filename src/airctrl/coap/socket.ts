@@ -56,7 +56,13 @@ export class CoapSocket {
   ) {
     this.messageId = randomInt(0, 0x10000)
     this.socket = createSocket('udp4')
-    this.socket.on('message', buffer => this.dispatch(buffer))
+    // Unconnected socket: without this check, any host on the network could spoof
+    // a reply by guessing the 4-byte token. Only accept datagrams from the device
+    // we're actually talking to.
+    this.socket.on('message', (buffer, rinfo) => {
+      if (rinfo.address !== this.host || rinfo.port !== this.port) return
+      this.dispatch(buffer)
+    })
     // A socket-level error must not become an unhandled exception. In-flight
     // requests still fail via their own timeouts; live observations get this
     // error pushed to onError so a dead network doesn't look like a quiet device.
@@ -105,7 +111,7 @@ export class CoapSocket {
       messageId: this.nextMessageId(),
       token,
       options,
-      payload: payload === undefined ? undefined : Buffer.from(payload as string),
+      payload: payload === undefined ? undefined : (Buffer.isBuffer(payload) ? payload : Buffer.from(payload)),
     }), this.port, this.host, error => {
       if (!error) return
       const key = token.toString('hex')

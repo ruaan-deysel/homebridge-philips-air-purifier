@@ -1,5 +1,5 @@
 import dgram from 'node:dgram'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CoapOption, decode, encode, findOption, uintToBuffer } from '../src/airctrl/coap/message.js'
 import { CoapSocket } from '../src/airctrl/coap/socket.js'
 
@@ -151,8 +151,7 @@ describe('CoapSocket.observe', () => {
     expect(findOption(observation.first.options, CoapOption.MaxAge)).toBeDefined()
 
     saved!.reply({ code: CONTENT_2_05, messageId: 99, token: saved!.token, payload: Buffer.from('second') })
-    await new Promise(resolve => setTimeout(resolve, 100))
-    expect(pushes).toEqual(['second'])
+    await vi.waitFor(() => expect(pushes).toEqual(['second']))
   })
 
   it('cancel() sends the same token with Observe=1 and stops notifications', async () => {

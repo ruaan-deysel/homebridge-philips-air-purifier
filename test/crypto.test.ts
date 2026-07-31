@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { DigestMismatchError, decrypt, deriveKeyAndIv, encrypt, nextKey } from '../src/airctrl/crypto.js'
 
@@ -41,5 +42,28 @@ describe('encrypt / decrypt', () => {
     const blob = encrypt('0DC377BA', '{"test":1}')
     const tampered = `${blob.slice(0, -1)}${blob.at(-1) === '0' ? '1' : '0'}`
     expect(() => decrypt(tampered)).toThrow(DigestMismatchError)
+  })
+
+  it('fails cleanly, not with a raw OpenSSL error, on a short/truncated blob', () => {
+    // Shorter than clientKey(8) + digest(64): slicing produces a garbage
+    // ciphertext/digest pair, which must still fail as a digest mismatch
+    // rather than throwing further down inside decipher.
+    expect(() => decrypt('0DC377BA')).toThrow(DigestMismatchError)
+    expect(() => decrypt('')).toThrow(DigestMismatchError)
+  })
+
+  it('throws (does not hang or return garbage) on an odd-length hex ciphertext', () => {
+    // Digest-valid but wire-corrupted: drop one hex nibble from the ciphertext,
+    // then recompute the digest so decrypt() gets past the digest check and
+    // reaches Buffer.from(ciphertext, 'hex') / decipher with a corrupt,
+    // odd-length string — the realistic wire-corruption path, distinct from
+    // tampering. Currently this surfaces as OpenSSL's own "wrong final block
+    // length" error rather than a DigestMismatchError; still a synchronous
+    // throw, not a silent failure, but not yet as clean as the other cases.
+    const blob = encrypt('0DC377BA', '{"test":1}')
+    const clientKey = blob.slice(0, 8)
+    const ciphertext = blob.slice(8, -64).slice(0, -1)
+    const digest = createHash('sha256').update(clientKey + ciphertext).digest('hex').toUpperCase()
+    expect(() => decrypt(clientKey + ciphertext + digest)).toThrow()
   })
 })

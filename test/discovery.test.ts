@@ -279,4 +279,34 @@ describe('discover', () => {
     await expect(discover({ hosts: ['127.0.0.1'], concurrency }))
       .rejects.toBeInstanceOf(RangeError)
   })
+
+  it('sweeps the default (interface-derived) subnets, skipping one too large instead of throwing', async () => {
+    // A plain /30 alongside an oversized docker0-style /16: before the F3 fix
+    // this rejected the whole call with a RangeError from hostsInSubnet.
+    vi.mocked(networkInterfaces).mockReturnValue({
+      en0: [{
+        address: '10.0.0.1',
+        netmask: '255.255.255.252',
+        family: 'IPv4',
+        mac: '00:00:00:00:00:00',
+        internal: false,
+        cidr: '10.0.0.1/30',
+      }],
+      docker0: [{
+        address: '172.17.0.1',
+        netmask: '255.255.0.0',
+        family: 'IPv4',
+        mac: '00:00:00:00:00:00',
+        internal: false,
+        cidr: '172.17.0.1/16',
+      }],
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await expect(discover({ timeoutMs: 20, concurrency: 8 })).resolves.toEqual([])
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('172.17.0.0/16'))
+    warn.mockRestore()
+    vi.mocked(networkInterfaces).mockReset()
+  })
 })

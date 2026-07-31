@@ -224,7 +224,8 @@ export class PhilipsCoapClient {
           await this.connect(Math.min(timeoutMs, resyncBudget))
         } catch {
           this.requireOpen()
-          return false
+          // A failed resync is retryable too: keep the stale key and let the next
+          // attempt's own resync try again, still bounded by the deadline below.
         }
       }
       const delayBudget = deadline - Date.now()
