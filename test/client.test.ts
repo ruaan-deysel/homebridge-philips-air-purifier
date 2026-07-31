@@ -164,6 +164,48 @@ describe('PhilipsCoapClient', () => {
     expect(pathOf(device.requests.at(-1)!)).toBe('/sys/dev/control')
   })
 
+  it('caps the total setControl retry-loop wall-clock time when the device never answers control writes', async () => {
+    vi.useFakeTimers()
+    try {
+      const client = new PhilipsCoapClient('127.0.0.1', 9999)
+      clients.push(client)
+      const socket = (client as unknown as { socket: CoapSocket }).socket
+      const request = vi.spyOn(socket, 'request').mockImplementation(options => {
+        if (options.path === '/sys/dev/sync') {
+          return Promise.resolve({
+            type: 1,
+            code: 69,
+            messageId: 1,
+            token: Buffer.alloc(0),
+            options: [],
+            payload: Buffer.from('0DC377BA'),
+          })
+        }
+        // Control writes never answer — the same failure mode as a device that
+        // ACKed /sys/dev/sync but never replies to /sys/dev/control.
+        return new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error('CoAP timeout')), options.timeoutMs ?? 8000)
+        })
+      })
+      await client.connect()
+
+      const clockStart = Date.now()
+      const result = client.setControl({ D03102: 1 })
+      await vi.runAllTimersAsync()
+      await expect(result).resolves.toBe(false)
+      const elapsed = Date.now() - clockStart
+
+      // Old defaults (retries: 5, retryDelayMs: 500, 8s socket timeout) could run
+      // ~50s inside a single onSet — well past HAP-NodeJS's ~10s write budget.
+      // The retry loop must now stay close to its ~6s budget.
+      expect(elapsed).toBeLessThanOrEqual(6500)
+      const controlAttempts = request.mock.calls.filter(([options]) => options.path === '/sys/dev/control')
+      expect(controlAttempts.length).toBeGreaterThan(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('returns false when a required resync fails and sends no later control write', async () => {
     const { device, client } = await start(request => {
       if (pathOf(request) === '/sys/dev/sync') return { payload: '0DC377BA' }

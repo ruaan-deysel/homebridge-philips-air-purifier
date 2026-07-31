@@ -26,6 +26,14 @@ export interface SetControlOptions {
   retries?: number
   retryDelayMs?: number
   resync?: boolean
+  /**
+   * Per-request CoAP timeout for the control write and any resync, kept short so
+   * a dead device fails fast instead of quietly exhausting HAP-NodeJS's ~10s
+   * onSet budget while the caller is still awaiting a response.
+   */
+  timeoutMs?: number
+  /** Hard wall-clock ceiling on the whole retry loop. */
+  budgetMs?: number
 }
 
 export class PhilipsCoapClient {
@@ -51,11 +59,11 @@ export class PhilipsCoapClient {
     }
   }
 
-  async connect(): Promise<void> {
+  async connect(timeoutMs?: number): Promise<void> {
     this.requireOpen()
     const nonce = randomBytes(4).toString('hex').toUpperCase()
     try {
-      const response = await this.socket.request({ method: 'POST', path: SYNC_PATH, payload: nonce })
+      const response = await this.socket.request({ method: 'POST', path: SYNC_PATH, payload: nonce, timeoutMs })
       this.requireOpen()
       this.clientKey = response.payload.toString().trim()
     } catch (error) {
@@ -164,7 +172,13 @@ export class PhilipsCoapClient {
     options: SetControlOptions = {},
   ): Promise<boolean> {
     this.requireOpen()
-    const { retries = 5, retryDelayMs = 500, resync = true } = options
+    const {
+      retries = 5,
+      retryDelayMs = 500,
+      resync = true,
+      timeoutMs = 2000,
+      budgetMs = 6000,
+    } = options
     this.requireKey()
     const payload = JSON.stringify({
       state: {
@@ -177,14 +191,23 @@ export class PhilipsCoapClient {
       },
     })
 
+    // Every wait below is clamped to what's left of this deadline, so the whole
+    // loop — regardless of how `retries` is configured — never runs longer than
+    // budgetMs. That keeps a single onSet() well inside HAP-NodeJS's ~10s write
+    // timeout instead of hammering an unresponsive device for tens of seconds.
+    const deadline = Date.now() + budgetMs
+
     for (let attempt = 0; attempt <= retries; attempt++) {
       this.requireOpen()
+      const requestBudget = deadline - Date.now()
+      if (requestBudget <= 0) break
       try {
         this.clientKey = nextKey(this.requireKey())
         const response = await this.socket.request({
           method: 'POST',
           path: CONTROL_PATH,
           payload: encrypt(this.clientKey, payload),
+          timeoutMs: Math.min(timeoutMs, requestBudget),
         })
         this.requireOpen()
         if (JSON.parse(response.payload.toString()).status === 'success') return true
@@ -194,15 +217,19 @@ export class PhilipsCoapClient {
       }
 
       if (attempt === retries) break
+      const resyncBudget = deadline - Date.now()
+      if (resyncBudget <= 0) break
       if (resync) {
         try {
-          await this.connect()
+          await this.connect(Math.min(timeoutMs, resyncBudget))
         } catch {
           this.requireOpen()
           return false
         }
       }
-      await new Promise(resolve => setTimeout(resolve, retryDelayMs))
+      const delayBudget = deadline - Date.now()
+      if (delayBudget <= 0) break
+      await new Promise(resolve => setTimeout(resolve, Math.min(retryDelayMs, delayBudget)))
     }
 
     return false
