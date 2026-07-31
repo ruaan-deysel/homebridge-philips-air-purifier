@@ -83,6 +83,12 @@ export class PhilipsAirAccessory {
     const targetState = this.purifier.getCharacteristic(C.TargetAirPurifierState)
     const rotationSpeed = this.purifier.getCharacteristic(C.RotationSpeed)
     rotationSpeed.setProps({ minStep: 100 / Math.max(1, Object.keys(model.speeds).length) })
+    // TargetAirPurifierState is mandatory on Service.AirPurifier, so Home always draws the
+    // Auto/Manual toggle. On a model with no auto preset (CX3550, ladder-only siblings, any
+    // unknown-model fallback) selecting Auto could only ever error — hide it instead.
+    if (!model.presetModes.auto) {
+      targetState.setProps({ validValues: [C.TargetAirPurifierState.MANUAL] })
+    }
 
     this.onGet(active, device => this.powered(device)
       ? C.Active.ACTIVE

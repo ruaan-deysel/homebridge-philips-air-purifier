@@ -516,6 +516,32 @@ describe('PhilipsAirAccessory', () => {
     expect(coordinator.setControl).not.toHaveBeenCalled()
   })
 
+  it('offers only Manual on a model with no Auto preset', async () => {
+    const { accessory } = setup(deviceConfig, {
+      pwr: '1',
+      pm25: 8,
+    }, resolveModel('unknown'))
+    const targetState = accessory.getService(Service.AirPurifier)!
+      .getCharacteristic(Characteristic.TargetAirPurifierState)
+
+    // TargetAirPurifierState is mandatory, so Home always draws the toggle. Selecting
+    // Auto on such a model can only ever error, so Auto must not be a valid value.
+    expect(targetState.props.validValues).toEqual([Characteristic.TargetAirPurifierState.MANUAL])
+    await expect(targetState.handleGetRequest())
+      .resolves.toBe(Characteristic.TargetAirPurifierState.MANUAL)
+  })
+
+  it('keeps both Auto and Manual on a model that has an Auto preset', () => {
+    const { accessory } = setup()
+    const targetState = accessory.getService(Service.AirPurifier)!
+      .getCharacteristic(Characteristic.TargetAirPurifierState)
+
+    expect(targetState.props.validValues).toEqual(expect.arrayContaining([
+      Characteristic.TargetAirPurifierState.MANUAL,
+      Characteristic.TargetAirPurifierState.AUTO,
+    ]))
+  })
+
   it('removes cached Sleep when the model has no Auto preset', () => {
     const cached = new Accessory('Office', uuid.generate('no-auto'))
     cached.addService(Service.Switch, 'Sleep Mode', 'sleep')
