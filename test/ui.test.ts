@@ -100,11 +100,11 @@ describe('config-ops (browser config logic)', () => {
     const blocks: any[] = []
     const result = ensureConfig(blocks)
     expect(result).toBe(blocks)
-    expect(blocks).toEqual([{ platform: 'PhilipsAir', name: 'Philips Air', devices: [] }])
+    expect(blocks).toEqual([{ platform: 'PhilipsAirPlus', name: 'Philips Air+', devices: [] }])
   })
 
   it('ensureConfig normalizes a non-array devices field', () => {
-    const blocks: any[] = [{ platform: 'PhilipsAir', name: 'Philips Air' }]
+    const blocks: any[] = [{ platform: 'PhilipsAirPlus', name: 'Philips Air+' }]
     ensureConfig(blocks)
     expect(blocks[0].devices).toEqual([])
   })
@@ -165,7 +165,7 @@ describe('config-ops (browser config logic)', () => {
   })
 
   it('createConfigMutator serializes concurrent mutations against a shared store', async () => {
-    let stored: any[] = [{ platform: 'PhilipsAir', name: 'Philips Air', devices: [] }]
+    let stored: any[] = [{ platform: 'PhilipsAirPlus', name: 'Philips Air+', devices: [] }]
     const loadCalls: number[] = []
     let loadSequence = 0
 
@@ -197,7 +197,7 @@ describe('config-ops (browser config logic)', () => {
   })
 
   it('createConfigMutator keeps later mutations running after an earlier one throws', async () => {
-    let stored: any[] = [{ platform: 'PhilipsAir', name: 'Philips Air', devices: [] }]
+    let stored: any[] = [{ platform: 'PhilipsAirPlus', name: 'Philips Air+', devices: [] }]
     const load = vi.fn(async () => JSON.parse(JSON.stringify(stored)))
     const save = vi.fn(async (blocks: any[]) => {
       stored = blocks
@@ -219,7 +219,7 @@ describe('custom UI package', () => {
     const schema = JSON.parse(await readFile(new URL('config.schema.json', root), 'utf8'))
 
     expect(schema).toMatchObject({
-      pluginAlias: 'PhilipsAir',
+      pluginAlias: 'PhilipsAirPlus',
       pluginType: 'platform',
       singular: true,
       customUiPath: './homebridge-ui',

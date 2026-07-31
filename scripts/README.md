@@ -25,7 +25,7 @@ It replaced an earlier `spike.mjs` that depended on the `coap` npm package.
 ## `explore.mjs`, `explore2.mjs` — historical key-domain probes
 
 These produced the hardware findings recorded in
-`docs/superpowers/specs/2026-07-30-homebridge-philips-air-design.md` (that
+`docs/superpowers/specs/2026-07-30-homebridge-philips-airplus-design.md` (that
 `D03105` is read-only, that `D03130` is stored as 0/100, that `D0310C=5` is
 Turbo, that `D03137` is not writable).
 

@@ -1,5 +1,5 @@
 {
-  "pluginAlias": "PhilipsAir",
+  "pluginAlias": "PhilipsAirPlus",
   "pluginType": "platform",
   "singular": true,
   "customUiPath": "./homebridge-ui",

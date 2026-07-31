@@ -3,8 +3,13 @@
 #
 # Verified layout: Homebridge runs in Docker container "homebridge"; its storage
 # dir /var/lib/homebridge resolves to /homebridge in the container, which is the
-# host directory /mnt/cache/appdata/homebridge. Plugins install into the
-# container's global npm root, /opt/homebridge/lib/node_modules.
+# host directory /mnt/cache/appdata/homebridge.
+#
+# Plugins install into the LOCAL plugin dir /var/lib/homebridge/node_modules,
+# NOT the global npm root. Only homebridge-config-ui-x lives in the global root
+# (/opt/homebridge/lib/node_modules); every other plugin on this instance is
+# local. Installing globally leaves the plugin invisible to Homebridge and the
+# UI, with no error anywhere — verified the hard way.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -37,16 +42,22 @@ TARBALL=$(npm pack --silent)
 trap 'rm -f "$TARBALL"' EXIT
 echo "    $TARBALL"
 
-echo "==> Ship to $UNRAID_HOST:$HOST_DIR"
+# Stable filename: npm records the install as
+#   "homebridge-philips-airplus": "file:homebridge-philips-airplus.tgz"
+# in /homebridge/package.json, so the tarball MUST stay on the host for that
+# reference to keep resolving. Deleting it leaves a dangling dependency and
+# every later `npm install` there fails with ENOENT; installing with --no-save
+# instead leaves the plugin unmanaged, so the next `npm install` prunes it and
+# its runtime deps. Keeping one stable, overwritten tarball avoids both.
+DEPLOYED=homebridge-philips-airplus.tgz
+
+echo "==> Ship to $UNRAID_HOST:$HOST_DIR/$DEPLOYED"
 sshpass -p "$UNRAID_PASS" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-  "$TARBALL" "$UNRAID_USER@$UNRAID_HOST:$HOST_DIR/$TARBALL"
+  "$TARBALL" "$UNRAID_USER@$UNRAID_HOST:$HOST_DIR/$DEPLOYED"
 
-echo "==> Install inside container"
+echo "==> Install inside container (local plugin dir, not global)"
 # --omit=dev so the container does not pull our test/build toolchain.
-remote "docker exec $CONTAINER npm install -g --omit=dev /homebridge/$TARBALL"
-
-echo "==> Clean up tarball on host"
-remote "rm -f $HOST_DIR/$TARBALL"
+remote "docker exec $CONTAINER npm install --prefix /var/lib/homebridge --omit=dev /homebridge/$DEPLOYED"
 
 echo "==> Restart Homebridge"
 remote "docker restart $CONTAINER" >/dev/null

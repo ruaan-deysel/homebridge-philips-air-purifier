@@ -1,6 +1,6 @@
 {
-  "name": "homebridge-philips-air",
-  "displayName": "Philips Air Purifier",
+  "name": "homebridge-philips-airplus",
+  "displayName": "Philips Air+ Purifier",
   "version": "0.1.0",
   "description": "HomeKit support for Philips air purifiers over encrypted CoAP, with no Python dependency.",
   "author": "Ruaan Deysel",
