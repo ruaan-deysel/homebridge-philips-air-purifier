@@ -55,8 +55,9 @@ export async function probeRequest(payload = {}, dependencies) {
   try {
     const { probeHost } = dependencies ?? await loadDiscovery()
     device = await probeHost(host, requestedPort, 4000)
-  } catch {
-    throw requestError(`Could not probe ${host}. Check the IP and try again.`)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw requestError(`Could not probe ${host}: ${detail}. Check the IP and try again.`)
   }
   if (!device) {
     throw requestError(`No Philips air purifier answered at ${host}. Check the IP and that the device is on this network.`)

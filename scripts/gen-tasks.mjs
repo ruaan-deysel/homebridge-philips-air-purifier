@@ -87,6 +87,7 @@ const tasks = Object.entries(META).map(([key, spec]) => {
   return { id, subject: spec.subject, status: 'pending', ...(spec.blockedBy.length ? { blockedBy: spec.blockedBy } : {}), description }
 })
 
+if (!process.argv[2]) throw new Error('Usage: node scripts/gen-tasks.mjs <lastUpdated ISO timestamp>')
 const out = { planPath: PLAN, tasks, lastUpdated: process.argv[2] }
 writeFileSync(`${PLAN}.tasks.json`, `${JSON.stringify(out, null, 2)}\n`)
 

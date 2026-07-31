@@ -34,8 +34,12 @@ they will not run as-is. Their findings are already captured in the spec and
 encoded as tests, so re-running them is rarely needed. To do so anyway:
 
 ```bash
-npm i -D coap && node scripts/explore.mjs 192.168.20.151 && npm uninstall coap
+npm i -D coap; node scripts/explore.mjs 192.168.20.151; npm uninstall coap
 ```
+
+Semicolons, not `&&` — `npm uninstall coap` must run even if the probe script
+exits non-zero, or the repo is left with a stray devDependency it deliberately
+does not carry.
 
 Both restore every value they touch.
 

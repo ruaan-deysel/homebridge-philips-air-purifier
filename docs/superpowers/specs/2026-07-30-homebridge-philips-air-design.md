@@ -308,7 +308,7 @@ FilterMaintenance (HEPA)     D0540E / D05408  → FilterLifeLevel
 TemperatureSensor            D03224 ÷ 10
 HumiditySensor               D03125
 Lightbulb                    D03135  lamp mode — On = 1, Off = 0
-                                     Brightness snaps 50 → 1, 100 → 2
+                                     (Brightness is not exposed; scope cut, see plan)
 Switch (opt-in, default off) Sleep  D0310C = 17
 Switch (opt-in, default off) Auto+ AI  D03180
 Switch (opt-in, default off) Beep   D03130 — On writes 100, not 1

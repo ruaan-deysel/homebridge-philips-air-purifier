@@ -34,6 +34,16 @@ describe('custom UI server', () => {
     })
   })
 
+  it('rejects an out-of-range port before probing', async () => {
+    const probe = vi.fn()
+
+    await expect(probeRequest({ host: '192.168.1.20', port: 70000 }, { probeHost: probe })).rejects.toMatchObject({
+      constructor: RequestError,
+      message: '"70000" is not a valid port.',
+    })
+    expect(probe).not.toHaveBeenCalled()
+  })
+
   it('converts probe failures to user-facing request errors', async () => {
     await expect(probeRequest(
       { host: '192.168.1.20' },

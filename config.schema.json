@@ -27,6 +27,10 @@
               "title": "Name",
               "type": "string"
             },
+            "model": {
+              "title": "Model",
+              "type": "string"
+            },
             "port": {
               "title": "CoAP Port",
               "type": "integer",

@@ -4060,10 +4060,22 @@ behavioural. Commit fixes in small related batches rather than one large commit.
 - [ ] **Step 5: Re-check the protocol invariants explicitly**
 
 ```bash
-grep -n '>>> 0' src/airctrl/crypto.ts                       # must be present
-grep -n '& 0xFFFFFFFF' src/ || echo 'no signed AND — good'  # must find nothing
-grep -n 'beepWriteValue' src/homekit/mapping.ts             # on must be 100
-grep -n 'D03105' src/accessory.ts || echo 'light does not use the read-only key — good'
+grep -n '>>> 0' src/airctrl/crypto.ts                                  # must be present
+
+# Real (non-comment) code must never use the signed `&` mask.
+if grep -rn '& 0xFFFFFFFF' src --include='*.ts' | grep -vE ':\s*(//|\*)'; then
+  echo 'FAIL: signed AND (& 0xFFFFFFFF) found outside a comment'; exit 1
+fi
+echo 'no signed AND outside comments — good'
+
+grep -n 'beepWriteValue' src/homekit/mapping.ts                        # on must be 100
+
+# accessory.ts must never read/write the read-only D03105 key.
+if grep -rn 'D03105' src/accessory.ts | grep -vE ':\s*(//|\*)'; then
+  echo 'FAIL: accessory.ts uses the read-only D03105 key outside a comment'; exit 1
+fi
+echo 'light does not use the read-only key — good'
+
 npx vitest run test/mapping.test.ts test/crypto.test.ts
 ```
 

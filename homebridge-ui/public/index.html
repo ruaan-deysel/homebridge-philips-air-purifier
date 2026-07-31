@@ -103,10 +103,19 @@
     const input = document.createElement('input')
     input.type = 'checkbox'
     input.checked = checked
-    input.addEventListener('change', () => void runBusy(async () => {
-      await mutateConfig(blocks => setDeviceToggle(blocks, host, key, input.checked))
-      say('Saved. Restart Homebridge to apply.', 'success')
-    }, 'Could not save the setting.'))
+    input.addEventListener('change', () => {
+      const next = input.checked
+      const previous = !next
+      void runBusy(async () => {
+        try {
+          await mutateConfig(blocks => setDeviceToggle(blocks, host, key, next))
+          say('Saved. Restart Homebridge to apply.', 'success')
+        } catch (error) {
+          input.checked = previous
+          throw error
+        }
+      }, 'Could not save the setting.')
+    })
     wrapper.append(input, ` ${label}`)
     return wrapper
   }
@@ -172,7 +181,7 @@
   scanButton.addEventListener('click', () => void runBusy(async () => {
     foundEl.replaceChildren()
     say('Scanning…')
-    const { subnet, scanned, devices } = await homebridge.request('/scan')
+    const { subnet, scanned, devices = [] } = await homebridge.request('/scan')
     document.getElementById('subnet').textContent = `${subnet} (${scanned} addresses)`
     if (devices.length === 0) {
       say('No devices found. Try adding the IP manually.', 'warning')
