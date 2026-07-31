@@ -43,7 +43,7 @@ describe('DeviceInfoSchema', () => {
 describe('PluginConfigSchema', () => {
   it('accepts a minimal config and defaults the switch opt-ins to false', () => {
     const config = PluginConfigSchema.parse({
-      platform: 'PhilipsAirPlus',
+      platform: 'PhilipsAirPurifier',
       devices: [{ host: '192.168.20.151' }],
     })
     expect(config.devices[0]!.host).toBe('192.168.20.151')
@@ -52,10 +52,10 @@ describe('PluginConfigSchema', () => {
   })
 
   it('rejects a device with no host', () => {
-    expect(() => PluginConfigSchema.parse({ platform: 'PhilipsAirPlus', devices: [{}] })).toThrow()
+    expect(() => PluginConfigSchema.parse({ platform: 'PhilipsAirPurifier', devices: [{}] })).toThrow()
   })
 
   it('defaults devices to an empty list so an unconfigured plugin is inert', () => {
-    expect(PluginConfigSchema.parse({ platform: 'PhilipsAirPlus' }).devices).toEqual([])
+    expect(PluginConfigSchema.parse({ platform: 'PhilipsAirPurifier' }).devices).toEqual([])
   })
 })

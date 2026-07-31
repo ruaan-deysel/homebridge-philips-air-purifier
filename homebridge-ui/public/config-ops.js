@@ -2,7 +2,7 @@
 // globals so it can be unit-tested directly (see test/ui.test.ts).
 
 export function ensureConfig(blocks) {
-  if (blocks.length === 0) blocks.push({ platform: 'PhilipsAirPlus', name: 'Philips Air+', devices: [] })
+  if (blocks.length === 0) blocks.push({ platform: 'PhilipsAirPurifier', name: 'Philips Air Purifier', devices: [] })
   if (!Array.isArray(blocks[0].devices)) blocks[0].devices = []
   return blocks
 }
