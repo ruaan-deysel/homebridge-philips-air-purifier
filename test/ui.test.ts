@@ -76,6 +76,37 @@ describe('custom UI server', () => {
     expect(result.devices).toEqual([device])
   })
 
+  it('scans every usable subnet on a multi-homed host instead of failing on the first', async () => {
+    // Real target: br0 192.168.20.0/24, a Docker bridge 172.18.0.0/16, shim-br0.
+    // Taking only localSubnets()[0] made the whole scan fatal whenever the /16 sorted first.
+    const discover = vi.fn().mockResolvedValue([])
+
+    const result = await scanRequest({}, {
+      discover,
+      hostsInSubnet,
+      localSubnets: () => ['172.18.0.0/16', '192.168.20.0/30'],
+    })
+
+    expect(discover).toHaveBeenCalledTimes(1)
+    expect(discover.mock.calls[0]?.[0].hosts).toEqual(['192.168.20.1', '192.168.20.2'])
+    expect(result.subnet).toBe('192.168.20.0/30')
+    expect(result.scanned).toBe(2)
+  })
+
+  it('still errors when no detected subnet is small enough to scan', async () => {
+    const discover = vi.fn()
+
+    await expect(scanRequest({}, {
+      discover,
+      hostsInSubnet,
+      localSubnets: () => ['172.18.0.0/16', '10.0.0.0/12'],
+    })).rejects.toMatchObject({
+      constructor: RequestError,
+      message: expect.stringContaining('172.18.0.0/16'),
+    })
+    expect(discover).not.toHaveBeenCalled()
+  })
+
   it('converts subnet detection failures to request errors', async () => {
     await expect(scanRequest({}, {
       discover: vi.fn(),

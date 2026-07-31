@@ -14,24 +14,34 @@ export async function scanRequest(payload = {}, dependencies) {
   }
   const { discover, hostsInSubnet, localSubnets } = discovery
   const requestedSubnet = typeof payload?.subnet === 'string' ? payload.subnet.trim() : ''
-  let subnet
+  let candidates
   try {
-    subnet = requestedSubnet || localSubnets()[0]
+    candidates = requestedSubnet ? [requestedSubnet] : localSubnets()
   } catch {
     throw requestError('Could not detect a local IPv4 network. Enter an IP address manually.')
   }
-  if (!subnet) {
+  if (candidates.length === 0) {
     throw requestError('No local IPv4 network detected. Enter an IP address manually.')
   }
 
-  let hosts
-  try {
-    hosts = [...hostsInSubnet(subnet)]
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw requestError(`Cannot scan ${subnet}: ${detail}. Enter an IP address manually.`)
+  // A multi-homed host (a Docker bridge alongside the LAN) must not fail the whole scan
+  // because one interface is too large — sweep every subnet that expands, like discover().
+  const hosts = []
+  const usable = []
+  const failures = []
+  for (const cidr of candidates) {
+    try {
+      hosts.push(...hostsInSubnet(cidr))
+      usable.push(cidr)
+    } catch (error) {
+      failures.push(`${cidr}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (usable.length === 0) {
+    throw requestError(`Cannot scan ${failures.join('; ')}. Enter an IP address manually.`)
   }
 
+  const subnet = usable.join(', ')
   try {
     const devices = await discover({ hosts, timeoutMs: 1500, concurrency: 48 })
     return { subnet, scanned: hosts.length, devices }
