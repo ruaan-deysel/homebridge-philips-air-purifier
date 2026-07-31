@@ -1,4 +1,4 @@
-# homebridge-philips-air — Design
+# homebridge-philips-air-purifier — Design
 
 **Date:** 2026-07-30
 **Status:** Approved, ready for implementation planning

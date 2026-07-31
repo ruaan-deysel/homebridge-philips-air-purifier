@@ -1,4 +1,4 @@
-# homebridge-philips-air Implementation Plan
+# homebridge-philips-air-purifier Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers-extended-cc:subagent-driven-development (recommended) or superpowers-extended-cc:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -74,7 +74,7 @@
 
 ```json
 {
-  "name": "homebridge-philips-air",
+  "name": "homebridge-philips-air-purifier",
   "displayName": "Philips Air Purifier",
   "version": "0.1.0",
   "description": "HomeKit support for Philips air purifiers over encrypted CoAP, with no Python dependency.",
@@ -198,10 +198,10 @@ export default [
 
 ```typescript
 /** Must match `pluginAlias` in config.schema.json. */
-export const PLATFORM_NAME = 'PhilipsAir'
+export const PLATFORM_NAME = 'PhilipsAirPurifier'
 
 /** Must match the `name` field in package.json. */
-export const PLUGIN_NAME = 'homebridge-philips-air'
+export const PLUGIN_NAME = 'homebridge-philips-air-purifier'
 ```
 
 - [ ] **Step 5: Create `src/index.ts`**
@@ -228,8 +228,8 @@ import { PLATFORM_NAME, PLUGIN_NAME } from '../src/settings.js'
 
 describe('scaffold', () => {
   it('exposes the platform and plugin names', () => {
-    expect(PLATFORM_NAME).toBe('PhilipsAir')
-    expect(PLUGIN_NAME).toBe('homebridge-philips-air')
+    expect(PLATFORM_NAME).toBe('PhilipsAirPurifier')
+    expect(PLUGIN_NAME).toBe('homebridge-philips-air-purifier')
   })
 })
 ```
@@ -1263,7 +1263,7 @@ describe('DeviceInfoSchema', () => {
 describe('PluginConfigSchema', () => {
   it('accepts a minimal config and defaults the switch opt-ins to false', () => {
     const config = PluginConfigSchema.parse({
-      platform: 'PhilipsAir',
+      platform: 'PhilipsAirPurifier',
       devices: [{ host: '192.168.20.151' }],
     })
     expect(config.devices[0]!.host).toBe('192.168.20.151')
@@ -1272,11 +1272,11 @@ describe('PluginConfigSchema', () => {
   })
 
   it('rejects a device with no host', () => {
-    expect(() => PluginConfigSchema.parse({ platform: 'PhilipsAir', devices: [{}] })).toThrow()
+    expect(() => PluginConfigSchema.parse({ platform: 'PhilipsAirPurifier', devices: [{}] })).toThrow()
   })
 
   it('defaults devices to an empty list so an unconfigured plugin is inert', () => {
-    expect(PluginConfigSchema.parse({ platform: 'PhilipsAir' }).devices).toEqual([])
+    expect(PluginConfigSchema.parse({ platform: 'PhilipsAirPurifier' }).devices).toEqual([])
   })
 })
 ```
@@ -3533,7 +3533,7 @@ takes down the platform or crashes Homebridge."
 - Create: `homebridge-ui/public/index.html`
 
 **Acceptance Criteria:**
-- [ ] `config.schema.json` sets `pluginAlias: "PhilipsAir"`, `pluginType: "platform"`, `singular: true`, `customUiPath: "./homebridge-ui"`
+- [ ] `config.schema.json` sets `pluginAlias: "PhilipsAirPurifier"`, `pluginType: "platform"`, `singular: true`, `customUiPath: "./homebridge-ui"`
 - [ ] The UI lists configured devices and supports remove
 - [ ] "Scan network" returns discovered devices with model, name, and firmware
 - [ ] Manual IP entry validates the address format, probes the host, and rejects one that is not a Philips device with a clear message
@@ -3553,7 +3553,7 @@ The schema stays minimal because the custom UI owns the real editing experience.
 
 ```json
 {
-  "pluginAlias": "PhilipsAir",
+  "pluginAlias": "PhilipsAirPurifier",
   "pluginType": "platform",
   "singular": true,
   "customUiPath": "./homebridge-ui",
@@ -3672,7 +3672,7 @@ new PhilipsAirUiServer()
   async function currentConfig() {
     const blocks = await homebridge.getPluginConfig()
     if (blocks.length === 0) {
-      blocks.push({ platform: 'PhilipsAir', name: 'Philips Air', devices: [] })
+      blocks.push({ platform: 'PhilipsAirPurifier', name: 'Philips Air', devices: [] })
       await homebridge.updatePluginConfig(blocks)
     }
     blocks[0].devices ||= []

@@ -1,6 +1,6 @@
 # Adversarial review notes — homebridge-philips-air
 
-Task 12 of `docs/superpowers/plans/2026-07-30-homebridge-philips-air.md`.
+Task 12 of `docs/superpowers/plans/2026-07-30-homebridge-philips-air-purifier.md`.
 
 Branch `worktree-philips-air-impl`. Reviewed range: `main..1017708`.
 
