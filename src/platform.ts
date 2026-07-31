@@ -1,10 +1,19 @@
-import type { API, DynamicPlatformPlugin, Logging, PlatformAccessory, PlatformConfig } from 'homebridge'
+import type {
+  API,
+  Characteristic as HapCharacteristic,
+  CharacteristicValue,
+  DynamicPlatformPlugin,
+  Logging,
+  Nullable,
+  PlatformAccessory,
+  PlatformConfig,
+} from 'homebridge'
 import { PhilipsAirAccessory } from './accessory.js'
 import { PhilipsCoapClient } from './airctrl/client.js'
 import { PluginConfigSchema, type DeviceConfig, type DeviceStatus } from './airctrl/schema.js'
 import { DeviceCoordinator } from './device/coordinator.js'
 import { Gen1Key, Gen2Key, Gen3Key } from './device/keys.js'
-import { detectGeneration, DEVICE_MODELS, resolveModel } from './device/models.js'
+import { detectGeneration, findModel, resolveModel } from './device/models.js'
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js'
 
 /** Stable seed for the accessory UUID: device id if known, else host. */
@@ -32,6 +41,11 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
   private readonly coordinators = new Set<DeviceCoordinator>()
   /** Accessory UUID -> owning device host, so a retrying device keeps its accessory. */
   private readonly claimed = new Map<string, string>()
+  /** Host -> characteristics {@link markOffline} poisoned, so {@link attach} can undo all of them. */
+  private readonly offlined = new Map<string, {
+    characteristic: HapCharacteristic
+    value: Nullable<CharacteristicValue>
+  }[]>()
   private shuttingDown = false
 
   constructor(
@@ -120,11 +134,14 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
     }
     const status = coordinator.status
     if (!status) return
+    // Undo markOffline() for every characteristic it touched, not just the ones
+    // PhilipsAirAccessory happens to re-register below.
+    this.clearOffline(device.host)
     try {
       const deviceId = firstString(status, [Gen1Key.DEVICE_ID, Gen3Key.SERIAL, 'device_id'])
       const modelId = firstString(status, [Gen3Key.MODEL_ID, Gen2Key.MODEL_ID, Gen1Key.MODEL_ID]) ?? ''
       const generation = detectGeneration(status)
-      const knownModel = DEVICE_MODELS[modelId] ?? DEVICE_MODELS[modelId.slice(0, 6)]
+      const knownModel = findModel(modelId)
       const model = knownModel ?? resolveModel(modelId, generation)
       if (!knownModel) {
         this.log.info(`Unknown model ${modelId || '(unreported)'}; using generic ${generation} profile`)
@@ -132,6 +149,10 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
 
       const accessoryUuid = this.api.hap.uuid.generate(accessoryUuidSeed(device, deviceId))
       if (!this.claim(accessoryUuid, device.host)) {
+        this.log.warn(
+          `Ignoring ${device.host}: it reports the same device id as ${this.claimed.get(accessoryUuid)}`
+          + ` (accessory ${accessoryUuid}). Remove the duplicate entry from your config.`,
+        )
         this.discard(coordinator)
         return
       }
@@ -187,10 +208,14 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
     const failure = (): Error => new this.api.hap.HapStatusError(
       this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
     )
+    const poisoned = this.offlined.get(device.host) ?? []
     for (const service of accessory.services) {
       if (service.UUID === this.Service.AccessoryInformation.UUID) continue
       for (const characteristic of service.characteristics) {
         if (characteristic.UUID === this.Characteristic.Name.UUID) continue
+        if (!poisoned.some(entry => entry.characteristic === characteristic)) {
+          poisoned.push({ characteristic, value: characteristic.value })
+        }
         characteristic.onGet(() => {
           throw failure()
         })
@@ -199,6 +224,19 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
         })
         characteristic.updateValue(failure())
       }
+    }
+    this.offlined.set(device.host, poisoned)
+  }
+
+  /** Drop the throwing handlers {@link markOffline} installed and restore the pre-offline values. */
+  private clearOffline(host: string): void {
+    const poisoned = this.offlined.get(host)
+    if (!poisoned) return
+    this.offlined.delete(host)
+    for (const { characteristic, value } of poisoned) {
+      characteristic.removeOnGet()
+      characteristic.removeOnSet()
+      characteristic.updateValue(value)
     }
   }
 

@@ -889,9 +889,22 @@ export function resolveModel(
   model: string,
   fallbackGeneration: ApiGeneration = ApiGeneration.Gen1,
 ): DeviceModelConfig {
-  return DEVICE_MODELS[model]
-    ?? DEVICE_MODELS[model.slice(0, 6)]
-    ?? config({ apiGeneration: fallbackGeneration })
+  return findModel(model) ?? config({ apiGeneration: fallbackGeneration })
+}
+
+/**
+ * Registry lookup for a reported model string, or undefined when unknown.
+ *
+ * `modelid` comes off the wire, so a plain `DEVICE_MODELS[model]` would resolve
+ * inherited members ('constructor', 'toString', '__proto__') to something truthy
+ * and defeat the caller's fallback. Own keys only.
+ */
+export function findModel(model: string): DeviceModelConfig | undefined {
+  return own(model) ?? own(model.slice(0, 6))
+}
+
+function own(key: string): DeviceModelConfig | undefined {
+  return Object.hasOwn(DEVICE_MODELS, key) ? DEVICE_MODELS[key] : undefined
 }
 
 /**

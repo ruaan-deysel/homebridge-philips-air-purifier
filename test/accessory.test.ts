@@ -282,6 +282,64 @@ describe('PhilipsAirAccessory', () => {
     expect(accessory.getServiceById(Service.Switch, 'beep')).toBeUndefined()
   })
 
+  it('adds sensors, filters and the lamp when they only appear in a later status report', async () => {
+    // A first report that omits keys the device has not sampled yet must not
+    // permanently hide those services for the whole process lifetime.
+    const { accessory, coordinator } = setup(deviceConfig, {
+      [Gen3Key.POWER]: 1,
+      [Gen3Key.MODE_B]: 0,
+      [Gen3Key.PM25]: 8,
+    })
+
+    expect(accessory.getService(Service.TemperatureSensor)).toBeUndefined()
+    expect(accessory.getService(Service.HumiditySensor)).toBeUndefined()
+    expect(accessory.getServiceById(Service.FilterMaintenance, 'pre-filter')).toBeUndefined()
+    expect(accessory.getServiceById(Service.Lightbulb, 'lamp')).toBeUndefined()
+
+    coordinator.publish({
+      [Gen3Key.TEMPERATURE]: 215,
+      [Gen3Key.HUMIDITY]: 45,
+      [Gen3Key.FILTER_PREFILTER]: 100,
+      [Gen3Key.FILTER_PREFILTER_TOTAL]: 200,
+      [Gen3Key.LAMP_MODE]: 1,
+    })
+
+    await expect(accessory.getService(Service.TemperatureSensor)!
+      .getCharacteristic(Characteristic.CurrentTemperature).handleGetRequest()).resolves.toBe(21.5)
+    await expect(accessory.getService(Service.HumiditySensor)!
+      .getCharacteristic(Characteristic.CurrentRelativeHumidity).handleGetRequest()).resolves.toBe(45)
+    await expect(accessory.getServiceById(Service.FilterMaintenance, 'pre-filter')!
+      .getCharacteristic(Characteristic.FilterLifeLevel).handleGetRequest()).resolves.toBe(50)
+
+    const light = accessory.getServiceById(Service.Lightbulb, 'lamp')!
+    await expect(light.getCharacteristic(Characteristic.On).handleGetRequest()).resolves.toBe(true)
+    await light.getCharacteristic(Characteristic.On).handleSetRequest(false)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen3Key.LAMP_MODE]: 0 })
+  })
+
+  it('never destroys a cached service because one status report was partial', () => {
+    // removeService takes the user's HomeKit room assignments and automations with
+    // it, so only a model that genuinely lacks the capability may trigger removal.
+    const cached = new Accessory('Office', uuid.generate('partial-report'))
+    cached.addService(Service.TemperatureSensor, 'Office Temperature')
+    cached.addService(Service.HumiditySensor, 'Office Humidity')
+    cached.addService(Service.FilterMaintenance, 'Pre-Filter', 'pre-filter')
+    cached.addService(Service.FilterMaintenance, 'NanoProtect Filter', 'nano-protect')
+    cached.addService(Service.Lightbulb, 'Lamp', 'lamp')
+
+    const { accessory } = setup(deviceConfig, {
+      [Gen3Key.POWER]: 1,
+      [Gen3Key.MODE_B]: 0,
+      [Gen3Key.PM25]: 8,
+    }, resolveModel('AC4220/12'), cached)
+
+    expect(accessory.getService(Service.TemperatureSensor)).toBeDefined()
+    expect(accessory.getService(Service.HumiditySensor)).toBeDefined()
+    expect(accessory.getServiceById(Service.FilterMaintenance, 'pre-filter')).toBeDefined()
+    expect(accessory.getServiceById(Service.FilterMaintenance, 'nano-protect')).toBeDefined()
+    expect(accessory.getServiceById(Service.Lightbulb, 'lamp')).toBeDefined()
+  })
+
   it('maps Gen1 power, presets, ladder state, sensors, filters, and light from registry keys', async () => {
     const status = {
       pwr: '1',

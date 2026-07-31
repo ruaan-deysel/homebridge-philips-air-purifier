@@ -278,6 +278,54 @@ describe('PhilipsAirPlatform', () => {
     }
   })
 
+  it('clears every offline handler it installed, not just the ones the accessory re-registers', async () => {
+    vi.useFakeTimers()
+    try {
+      const mockApi = api()
+      const platform = new PhilipsAirPlatform(log(), config(['192.0.2.1']), mockApi)
+      const configured = cached('Offline', 'stable-device-id', '192.0.2.1')
+      const purifier = configured.addService(Service.AirPurifier, 'Offline')
+      // A characteristic PhilipsAirAccessory never registers a handler for — e.g. one
+      // persisted by an older plugin version, or added when the user renames the
+      // accessory in the Home app. It must recover with everything else.
+      const orphan = purifier.getCharacteristic(Characteristic.SwingMode)
+      orphan.updateValue(Characteristic.SwingMode.SWING_ENABLED)
+      platform.configureAccessory(configured)
+      fakeDevices.set('192.0.2.1', { error: new Error('offline') })
+
+      mockApi.events.get('didFinishLaunching')!()
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(orphan.handleGetRequest()).rejects.toBeDefined()
+
+      fakeDevices.set('192.0.2.1', { status: gen3Status() })
+      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(mockApi.updated).toEqual([configured])
+      await expect(orphan.handleGetRequest()).resolves.toBe(Characteristic.SwingMode.SWING_ENABLED)
+      expect(orphan.statusCode).toBe(HAPStatus.SUCCESS)
+
+      mockApi.events.get('shutdown')!()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('falls back to the generic profile for a model name that collides with Object.prototype', async () => {
+    const mockApi = api()
+    const platformLog = log()
+    fakeDevices.set('192.0.2.4', { status: gen3Status('constructor') })
+    new PhilipsAirPlatform(platformLog, config(['192.0.2.4']), mockApi)
+
+    await launch(mockApi)
+    const purifier = mockApi.registered[0]!.getService(Service.AirPurifier)!
+    await purifier.getCharacteristic(Characteristic.Active).handleSetRequest(Characteristic.Active.ACTIVE)
+
+    expect(vi.mocked(platformLog.info).mock.calls
+      .filter(([message]) => String(message).includes('Unknown model'))).toHaveLength(1)
+    expect(fakeClients.get('192.0.2.4')?.setControl).toHaveBeenCalledWith({ [Gen3Key.POWER]: 1 })
+  })
+
   it('logs once and removes cached accessories when no devices are configured', async () => {
     const mockApi = api()
     const platformLog = log()
@@ -363,14 +411,20 @@ describe('PhilipsAirPlatform', () => {
 
   it('cleans up a second host that resolves to an already configured device id', async () => {
     const mockApi = api()
+    const platformLog = log()
     fakeDevices.set('192.0.2.1', { status: gen3Status() })
     fakeDevices.set('192.0.2.2', { status: gen3Status() })
-    new PhilipsAirPlatform(log(), config(['192.0.2.1', '192.0.2.2']), mockApi)
+    new PhilipsAirPlatform(platformLog, config(['192.0.2.1', '192.0.2.2']), mockApi)
 
     mockApi.events.get('didFinishLaunching')!()
     await new Promise(resolve => setImmediate(resolve))
 
     expect(mockApi.registered).toHaveLength(1)
+    // The discarded device must say so: silently dropping it makes a configured
+    // device look like it simply never appeared.
+    const warnings = vi.mocked(platformLog.warn).mock.calls.map(([message]) => String(message))
+    expect(warnings.filter(message =>
+      message.includes('192.0.2.2') && message.includes('192.0.2.1'))).toHaveLength(1)
     expect(fakeClients.get('192.0.2.1')?.close).not.toHaveBeenCalled()
     expect(fakeClients.get('192.0.2.2')?.close).toHaveBeenCalledOnce()
   })

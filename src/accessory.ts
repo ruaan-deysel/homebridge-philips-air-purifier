@@ -22,6 +22,12 @@ import {
   temperatureFromRaw,
 } from './homekit/mapping.js'
 
+interface LightControl {
+  key: string
+  on: string | number
+  off: string | number
+}
+
 /** The structural slice Task 9's platform supplies. */
 export interface PhilipsAirPlatformLike {
   readonly api: API
@@ -41,7 +47,8 @@ export class PhilipsAirAccessory {
   private nanoFilter?: HapService
   private nanoFilterKeys?: [string, string]
   private light?: HapService
-  private lightControl?: { key: string, on: string | number, off: string | number }
+  private lightControl?: LightControl
+  private readonly lightCandidates: LightControl[]
   private sleep?: HapService
   private autoPlus?: HapService
   private beep?: HapService
@@ -109,8 +116,11 @@ export class PhilipsAirAccessory {
       if (!control) throw this.communicationError()
       return this.write(control)
     })
+    // Capability gating is model-driven, never payload-driven: a partial status report
+    // must not permanently drop a service, and must never destroy a cached one (that
+    // loses the user's HomeKit room assignments and automations).
     const childLockKey = this.childLockKey
-    if (status && childLockKey && childLockKey in status) {
+    if (childLockKey) {
       this.childLock = this.purifier.getCharacteristic(C.LockPhysicalControls)
       this.onGet(this.childLock, device => this.childLockFromValue(device[childLockKey])
         ? C.LockPhysicalControls.CONTROL_LOCK_ENABLED
@@ -127,71 +137,10 @@ export class PhilipsAirAccessory {
     this.onGet(pm25, device => this.number(device[this.pm25Key]))
     this.onGet(airQuality, device => airQualityFromPm25(device[this.pm25Key]))
 
-    const temperatureKey = this.temperatureKey
-    if (status && temperatureKey && temperatureKey in status) {
-      this.temperature = accessory.getService(S.TemperatureSensor)
-        ?? accessory.addService(S.TemperatureSensor, `${accessory.displayName} Temperature`)
-      this.purifier.addLinkedService(this.temperature)
-      this.onGet(
-        this.temperature.getCharacteristic(C.CurrentTemperature),
-        device => this.temperatureValue(device[temperatureKey]),
-      )
-    } else {
-      const cached = accessory.getService(S.TemperatureSensor)
-      if (cached) accessory.removeService(cached)
-    }
-
-    const humidityKey = this.humidityKey
-    if (status && humidityKey && humidityKey in status) {
-      this.humidity = accessory.getService(S.HumiditySensor)
-        ?? accessory.addService(S.HumiditySensor, `${accessory.displayName} Humidity`)
-      this.purifier.addLinkedService(this.humidity)
-      this.onGet(
-        this.humidity.getCharacteristic(C.CurrentRelativeHumidity),
-        device => this.number(device[humidityKey]),
-      )
-    } else {
-      const cached = accessory.getService(S.HumiditySensor)
-      if (cached) accessory.removeService(cached)
-    }
-
-    this.preFilterKeys = status ? this.filterKeys(status, 'pre') : undefined
-    if (this.preFilterKeys) {
-      this.preFilter = accessory.getServiceById(S.FilterMaintenance, 'pre-filter')
-        ?? accessory.addService(S.FilterMaintenance, 'Pre-Filter', 'pre-filter')
-      this.purifier.addLinkedService(this.preFilter)
-      this.wireFilter(this.preFilter, ...this.preFilterKeys)
-    } else {
-      const cached = accessory.getServiceById(S.FilterMaintenance, 'pre-filter')
-      if (cached) accessory.removeService(cached)
-    }
-
-    this.nanoFilterKeys = status ? this.filterKeys(status, 'nano') : undefined
-    if (this.nanoFilterKeys) {
-      this.nanoFilter = accessory.getServiceById(S.FilterMaintenance, 'nano-protect')
-        ?? accessory.addService(S.FilterMaintenance, 'NanoProtect Filter', 'nano-protect')
-      this.purifier.addLinkedService(this.nanoFilter)
-      this.wireFilter(this.nanoFilter, ...this.nanoFilterKeys)
-    } else {
-      const cached = accessory.getServiceById(S.FilterMaintenance, 'nano-protect')
-      if (cached) accessory.removeService(cached)
-    }
-
-    const cachedLight = accessory.getServiceById(S.Lightbulb, 'lamp')
-    this.lightControl = status
-      ? model.lights.map(key => this.lightValues(key)).find(control => control && control.key in status)
-      : undefined
-    if (config.exposeLight && this.lightControl) {
-      this.light = cachedLight ?? accessory.addService(S.Lightbulb, 'Lamp', 'lamp')
-      this.purifier.addLinkedService(this.light)
-      const on = this.light.getCharacteristic(C.On)
-      this.onGet(on, device => device[this.lightControl!.key] !== this.lightControl!.off)
-      on.onSet(value => this.write({
-        [this.lightControl!.key]: value ? this.lightControl!.on : this.lightControl!.off,
-      }))
-    } else if (cachedLight) {
-      accessory.removeService(cachedLight)
-    }
+    this.lightCandidates = model.lights
+      .map(key => this.lightValues(key))
+      .filter((control): control is LightControl => control !== undefined)
+    this.syncOptionalServices(status)
 
     const cachedSleep = accessory.getServiceById(S.Switch, 'sleep')
     if (config.exposeSleepSwitch && this.model.presetModes.sleep && this.model.presetModes.auto) {
@@ -227,9 +176,9 @@ export class PhilipsAirAccessory {
     // bulb to that key makes them fight — toggling one silently flips the other.
     // The light wins; the beep switch is skipped when they collide.
     const beepCollidesWithLight = beepKey !== undefined
-      && this.light !== undefined
-      && this.lightControl?.key === beepKey
-    if (config.exposeBeepSwitch && status && beepKey && beepKey in status && !beepCollidesWithLight) {
+      && config.exposeLight
+      && this.lightCandidates.some(control => control.key === beepKey)
+    if (config.exposeBeepSwitch && beepKey && !beepCollidesWithLight) {
       this.beep = cachedBeep ?? accessory.addService(S.Switch, 'Beep', 'beep')
       this.purifier.addLinkedService(this.beep)
       const on = this.beep.getCharacteristic(C.On)
@@ -243,6 +192,7 @@ export class PhilipsAirAccessory {
     }
 
     coordinator.on('status', (next: DeviceStatus) => {
+      this.syncOptionalServices(next)
       this.updateInformation(next)
       if (coordinator.available) this.updateCharacteristics(next)
     })
@@ -253,6 +203,103 @@ export class PhilipsAirAccessory {
     if (status) this.updateInformation(status)
     if (coordinator.available && status) this.updateCharacteristics(status)
     else this.markUnavailable()
+  }
+
+  /**
+   * Create the sensor/filter/lamp services this device turns out to have.
+   *
+   * Runs on every status, not just the first: a partial first report (the device omits
+   * keys it has not sampled yet) must not permanently hide a sensor. A cached service is
+   * only removed when the *model* lacks the capability — removing one because a single
+   * payload was short would throw away the user's room assignments and automations.
+   */
+  private syncOptionalServices(status: DeviceStatus | null): void {
+    const S = this.platform.Service
+    const C = this.platform.Characteristic
+    const accessory = this.accessory
+
+    if (!this.temperature) {
+      const key = this.temperatureKey
+      if (!key) this.removeCached(accessory.getService(S.TemperatureSensor))
+      else if (status && key in status) {
+        this.temperature = accessory.getService(S.TemperatureSensor)
+          ?? accessory.addService(S.TemperatureSensor, `${accessory.displayName} Temperature`)
+        this.purifier.addLinkedService(this.temperature)
+        this.onGet(
+          this.temperature.getCharacteristic(C.CurrentTemperature),
+          device => this.temperatureValue(device[key]),
+        )
+      }
+    }
+
+    if (!this.humidity) {
+      const key = this.humidityKey
+      if (!key) this.removeCached(accessory.getService(S.HumiditySensor))
+      else if (status && key in status) {
+        this.humidity = accessory.getService(S.HumiditySensor)
+          ?? accessory.addService(S.HumiditySensor, `${accessory.displayName} Humidity`)
+        this.purifier.addLinkedService(this.humidity)
+        this.onGet(
+          this.humidity.getCharacteristic(C.CurrentRelativeHumidity),
+          device => this.number(device[key]),
+        )
+      }
+    }
+
+    if (!this.preFilter) {
+      const keys = status ? this.filterKeys(status, 'pre') : undefined
+      if (!this.filterSupported('pre')) {
+        this.removeCached(accessory.getServiceById(S.FilterMaintenance, 'pre-filter'))
+      } else if (keys) {
+        this.preFilterKeys = keys
+        this.preFilter = accessory.getServiceById(S.FilterMaintenance, 'pre-filter')
+          ?? accessory.addService(S.FilterMaintenance, 'Pre-Filter', 'pre-filter')
+        this.purifier.addLinkedService(this.preFilter)
+        this.wireFilter(this.preFilter, ...keys)
+      }
+    }
+
+    if (!this.nanoFilter) {
+      const keys = status ? this.filterKeys(status, 'nano') : undefined
+      if (!this.filterSupported('nano')) {
+        this.removeCached(accessory.getServiceById(S.FilterMaintenance, 'nano-protect'))
+      } else if (keys) {
+        this.nanoFilterKeys = keys
+        this.nanoFilter = accessory.getServiceById(S.FilterMaintenance, 'nano-protect')
+          ?? accessory.addService(S.FilterMaintenance, 'NanoProtect Filter', 'nano-protect')
+        this.purifier.addLinkedService(this.nanoFilter)
+        this.wireFilter(this.nanoFilter, ...keys)
+      }
+    }
+
+    if (!this.light) {
+      const control = status
+        ? this.lightCandidates.find(candidate => candidate.key in status)
+        : undefined
+      if (!this.config.exposeLight || this.lightCandidates.length === 0) {
+        this.removeCached(accessory.getServiceById(S.Lightbulb, 'lamp'))
+      } else if (control) {
+        this.lightControl = control
+        this.light = accessory.getServiceById(S.Lightbulb, 'lamp')
+          ?? accessory.addService(S.Lightbulb, 'Lamp', 'lamp')
+        this.purifier.addLinkedService(this.light)
+        const on = this.light.getCharacteristic(C.On)
+        this.onGet(on, device => device[control.key] !== control.off)
+        on.onSet(value => this.write({ [control.key]: value ? control.on : control.off }))
+      }
+    }
+  }
+
+  private removeCached(service: HapService | undefined): void {
+    if (service) this.accessory.removeService(service)
+  }
+
+  /** Whether the model can have this filter at all — independent of any status payload. */
+  private filterSupported(kind: 'pre' | 'nano'): boolean {
+    const unavailableKey = kind === 'pre'
+      ? Gen1Key.FILTER_NANOPROTECT_PREFILTER
+      : Gen1Key.FILTER_NANOPROTECT
+    return !this.unavailable(this.model.unavailableFilters, unavailableKey)
   }
 
   private get power(): ReturnType<typeof powerValues> {

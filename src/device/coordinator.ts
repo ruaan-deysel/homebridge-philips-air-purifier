@@ -66,7 +66,22 @@ export class DeviceCoordinator extends EventEmitter {
       )) return
     }
     this.lastStatus = status
-    this.emit('status', status)
+    this.safeEmit('status', status)
+  }
+
+  /**
+   * Emit without letting a consumer's exception escape into transport state. The HomeKit
+   * layer throws HapStatusError, and a throw out of {@link ingest} would mark the device
+   * unavailable or abort a successful reconnect. Listeners are isolated from each other.
+   */
+  private safeEmit(event: 'status' | 'availability', payload: DeviceStatus | boolean): void {
+    for (const listener of this.rawListeners(event)) {
+      try {
+        listener(payload)
+      } catch (error) {
+        this.log.error(`${this.host} ${event} listener failed: ${String(error)}`)
+      }
+    }
   }
 
   markAvailable(message = `${this.host} available`): void {
@@ -74,14 +89,14 @@ export class DeviceCoordinator extends EventEmitter {
     this.isAvailable = true
     this.forceNextStatus = this.lastStatus !== null
     this.log.info(message)
-    this.emit('availability', true)
+    this.safeEmit('availability', true)
   }
 
   markUnavailable(reason: string): void {
     if (!this.isAvailable) return
     this.isAvailable = false
     this.log.warn(`${this.host} unavailable: ${reason}`)
-    this.emit('availability', false)
+    this.safeEmit('availability', false)
   }
 
   nextBackoffMs(): number {

@@ -291,6 +291,75 @@ describe('DeviceCoordinator', () => {
     coordinator.shutdown()
   })
 
+  it('keeps a throwing listener out of transport state', () => {
+    vi.useFakeTimers()
+    const log = logging()
+    const coordinator = new DeviceCoordinator(client(), log, '192.0.2.1')
+    const seen: Record<string, unknown>[] = []
+    const availability: boolean[] = []
+    coordinator.on('status', () => {
+      throw new Error('consumer blew up')
+    })
+    coordinator.on('status', status => seen.push(status))
+    coordinator.on('availability', () => {
+      throw new Error('availability consumer blew up')
+    })
+    coordinator.on('availability', value => availability.push(value))
+
+    expect(() => coordinator.ingest({ a: 1 })).not.toThrow()
+    expect(() => coordinator.markAvailable()).not.toThrow()
+
+    // A consumer bug must not stop the other consumers or the coordinator itself.
+    expect(seen).toEqual([{ a: 1 }])
+    expect(availability).toEqual([true])
+    expect(coordinator.status).toEqual({ a: 1 })
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining('consumer blew up'))
+    coordinator.shutdown()
+  })
+
+  it('arms the backoff on retryStart after a failed initial connect', async () => {
+    vi.useFakeTimers()
+    const first = controlledClient()
+    first.connect.mockRejectedValue(new Error('offline'))
+    const replacement = controlledClient({ pwr: '1' }, 10)
+    const reconnectClient = vi.fn().mockResolvedValue(replacement)
+    const coordinator = new DeviceCoordinator(first, logging(), '192.0.2.1', reconnectClient)
+
+    await expect(coordinator.start()).rejects.toThrow('offline')
+    expect(vi.getTimerCount()).toBe(0)
+
+    coordinator.retryStart()
+    expect(vi.getTimerCount()).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(reconnectClient).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await flush()
+
+    expect(reconnectClient).toHaveBeenCalledOnce()
+    expect(coordinator.status).toEqual({ pwr: '1' })
+    expect(coordinator.available).toBe(true)
+    coordinator.shutdown()
+  })
+
+  it('never double-arms retryStart and never retries after shutdown', async () => {
+    vi.useFakeTimers()
+    const reconnectClient = vi.fn().mockResolvedValue(controlledClient())
+    const coordinator = new DeviceCoordinator(controlledClient(), logging(), '192.0.2.1', reconnectClient)
+
+    coordinator.retryStart()
+    coordinator.retryStart()
+    expect(vi.getTimerCount()).toBe(1)
+
+    coordinator.shutdown()
+    expect(vi.getTimerCount()).toBe(0)
+    coordinator.retryStart()
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(vi.getTimerCount()).toBe(0)
+    expect(reconnectClient).not.toHaveBeenCalled()
+  })
+
   it('shutdown ends observation, clears timers and listeners, and blocks reconnect races', async () => {
     vi.useFakeTimers()
     const first = controlledClient()
