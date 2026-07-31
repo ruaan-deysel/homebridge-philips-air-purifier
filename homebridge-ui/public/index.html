@@ -162,12 +162,14 @@
   function renderFound(devices) {
     const cards = devices.map(device => {
       const card = textElement('div', 'pa-card pa-row pa-spread', '')
+      // Name, IP and model only. Firmware is deliberately not shown: /sys/dev/info
+      // reports swversion "0.0.0" on an AC4220/12 whose real firmware is 0.2.3
+      // (that lives in the status payload as D01S12), so it is misleading here.
       const summary = textElement('span', '', '')
       summary.append(
-        textElement('strong', '', device.model),
-        document.createTextNode(` “${device.name}”`),
+        textElement('strong', '', deviceTitle(device)),
         document.createElement('br'),
-        textElement('span', 'pa-muted', [device.host, device.firmware && `fw ${device.firmware}`].filter(Boolean).join(' · ')),
+        textElement('span', 'pa-muted', [device.host, device.model].filter(Boolean).join(' · ')),
       )
       const add = textElement('button', 'btn btn-sm btn-primary', 'Add')
       add.type = 'button'
