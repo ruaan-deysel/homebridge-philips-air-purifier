@@ -349,6 +349,45 @@ describe('PhilipsAirPlatform', () => {
     expect(mockApi.registered).toEqual([])
   })
 
+  it('poisons every configured cached accessory before the first probe, not just failed ones', async () => {
+    const mockApi = api()
+    const platform = new PhilipsAirPlatform(log(), config(['192.0.2.1', '192.0.2.3']), mockApi)
+    const later = cached('Bedroom', 'later-id', '192.0.2.3')
+    const purifier = later.addService(Service.AirPurifier, 'Bedroom')
+    const active = purifier.getCharacteristic(Characteristic.Active)
+    active.updateValue(Characteristic.Active.INACTIVE)
+    platform.configureAccessory(later)
+    // The first device hangs, so probing never reaches 192.0.2.3 — exactly the window
+    // where a cached accessory with no handlers silently accepts a write from the Home app.
+    fakeDevices.set('192.0.2.1', { status: gen3Status(), connect: new Promise<void>(() => {}) })
+
+    mockApi.events.get('didFinishLaunching')!()
+    await new Promise(resolve => setImmediate(resolve))
+
+    expect(fakeClientCreations.has('192.0.2.3')).toBe(false)
+    expect(active.statusCode).toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+    await expect(active.handleSetRequest(Characteristic.Active.ACTIVE)).rejects.toBeDefined()
+    await expect(active.handleGetRequest()).rejects.toBeDefined()
+
+    mockApi.events.get('shutdown')!()
+  })
+
+  it('logs instead of crashing when a prune throws on the startup path', async () => {
+    const mockApi = api()
+    const platformLog = log()
+    vi.mocked(mockApi.unregisterPlatformAccessories).mockImplementation(() => {
+      throw new Error('unregister exploded')
+    })
+    const platform = new PhilipsAirPlatform(platformLog, config([]), mockApi)
+    platform.configureAccessory(cached('Removed', 'removed-id', '192.0.2.9'))
+
+    // An unhandled rejection here terminates Node 22/24, taking Homebridge with it.
+    mockApi.events.get('didFinishLaunching')!()
+    await vi.waitFor(() => expect(platformLog.error).toHaveBeenCalledWith(
+      expect.stringContaining('unregister exploded'),
+    ))
+  })
+
   it('logs an unknown model once and controls it with the detected generation', async () => {
     const mockApi = api()
     const platformLog = log()

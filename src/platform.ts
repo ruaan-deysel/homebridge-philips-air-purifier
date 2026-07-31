@@ -55,7 +55,12 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
   ) {
     this.Service = api.hap.Service
     this.Characteristic = api.hap.Characteristic
-    api.on('didFinishLaunching', () => void this.discoverDevices())
+    api.on('didFinishLaunching', () => {
+      // An unhandled rejection here would take Homebridge down on Node 22/24.
+      this.discoverDevices().catch(error => {
+        this.log.error(`Device discovery failed: ${String(error)}`)
+      })
+    })
     api.on('shutdown', () => this.shutdown())
   }
 
@@ -78,6 +83,14 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
       this.unregister([...this.cached])
       return
     }
+
+    // Probing is sequential and each device costs up to ~16s, so a cached accessory for a
+    // later device would sit with no onGet/onSet at all for tens of seconds — long enough
+    // for the Home app to accept a write that never reaches the device. Poison them all up
+    // front; attach() calls clearOffline() as soon as a device actually answers.
+    // ponytail: sequential probe kept deliberately — the duplicate-UUID claim logic is
+    // order-sensitive. Revisit with Promise.allSettled if startup latency matters.
+    for (const device of devices) this.markOffline(device)
 
     const seenHosts = new Set<string>()
     for (const device of devices) {
