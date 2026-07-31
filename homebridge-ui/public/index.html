@@ -178,7 +178,7 @@
     foundEl.replaceChildren(...cards)
   }
 
-  scanButton.addEventListener('click', () => void runBusy(async () => {
+  async function scan() {
     foundEl.replaceChildren()
     say('Scanning…')
     const { subnet, scanned, devices = [] } = await homebridge.request('/scan')
@@ -189,7 +189,9 @@
     }
     renderFound(devices)
     say(`Found ${devices.length} device(s).`, 'success')
-  }, 'Scan failed.'))
+  }
+
+  scanButton.addEventListener('click', () => void runBusy(scan, 'Scan failed.'))
 
   manualForm.addEventListener('submit', event => {
     event.preventDefault()
@@ -200,8 +202,14 @@
     }, 'Probe failed.')
   })
 
+  // This panel owns the whole configuration, so the generated schema form is
+  // never shown — it would duplicate these controls and expose plumbing like
+  // the CoAP port, which only ever differs on non-standard firmware and can
+  // still be set via the JSON Config editor.
   void runBusy(async () => {
     await renderConfigured()
-    homebridge.showSchemaForm()
+    // Scan straight away: a fresh install has nothing configured, and the whole
+    // point of this panel is that setup needs no typing.
+    await scan()
   }, 'Could not load the plugin configuration.')
 </script>

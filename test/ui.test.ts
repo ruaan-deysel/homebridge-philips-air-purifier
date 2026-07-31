@@ -218,10 +218,18 @@ describe('custom UI package', () => {
   it('declares the exact Homebridge platform metadata and service toggles', async () => {
     const schema = JSON.parse(await readFile(new URL('config.schema.json', root), 'utf8'))
 
+    // `customUi: true` is the flag config-ui-x actually gates on:
+    //   const s = plugin.settingsSchema ? configSchema : undefined
+    //   if (s && s.customUi) return openCustomSettingsUi(...)
+    // Without it the custom panel is silently ignored and the generated schema
+    // form is rendered instead — no error, no log, just the wrong UI. An
+    // earlier version of this test asserted only `customUiPath`, which config-ui-x
+    // reads *after* that gate, so the whole custom UI shipped disabled.
     expect(schema).toMatchObject({
       pluginAlias: 'PhilipsAirPurifier',
       pluginType: 'platform',
       singular: true,
+      customUi: true,
       customUiPath: './homebridge-ui',
     })
     expect(Object.keys(schema.schema.properties.devices.items.properties)).toEqual(expect.arrayContaining([

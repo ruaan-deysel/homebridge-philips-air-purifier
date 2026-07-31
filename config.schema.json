@@ -2,8 +2,9 @@
   "pluginAlias": "PhilipsAirPurifier",
   "pluginType": "platform",
   "singular": true,
+  "customUi": true,
   "customUiPath": "./homebridge-ui",
-  "headerDisplay": "Philips air purifiers over encrypted CoAP. Use the panel above to scan for devices — no JSON editing required.",
+  "headerDisplay": "Philips air purifiers over encrypted CoAP. Scan for devices below — no JSON editing required.",
   "schema": {
     "type": "object",
     "properties": {
