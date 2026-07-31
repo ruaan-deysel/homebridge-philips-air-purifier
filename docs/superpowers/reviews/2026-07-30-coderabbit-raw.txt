@@ -1,0 +1,1065 @@
+Notice: Detected claude environment. Use `coderabbit review --agent` for structured agent-friendly output.
+
+────────────────────────────────────────
+CodeRabbit CLI 0.7.1
+What's new
+
+Config       : coderabbit config validate checks YAML syntax and the current official schema with line-oriented errors and CI-friendly exit codes
+Auth         : coding-agent reviews can use a runtime-provisioned, task-scoped capability without an interactive sign-in or shared API key
+Auth         : agent login uses localhost callbacks only and never requests pasted OAuth tokens; unsupported environments hand off to interactive login
+GitLab       : selected self-managed organizations beyond the initial discovery cap can complete CLI authentication
+Billing      : legacy GitHub sessions with a verified paid seat can use enabled usage-based reviews after included limits, with accurate sign-in or seat guidance
+Agents       : agent-driven reviews preserve final CLI output and report interrupted runs as partial
+────────────────────────────────────────
+
+Connecting to CodeRabbit... 0s elapsed
+
+   !   Found this repository in ruaan-deysel. This review will use
+       ruaan-deysel's CodeRabbit plan and count toward its usage.
+
+────────────────────────────────────────
+CodeRabbit Review
+
+Diff      : tracked changes
+Compare   : worktree-philips-air-impl → main (local main differs, using origin/main)
+Directory : philips-air-impl
+────────────────────────────────────────
+
+(\(\
+(• .•)  Stack Overflow called, they want their code back.
+
+Preparing review... 4s elapsed
+Summarizing changes... 5s elapsed
+Writing review comments... 32s elapsed
+Writing review comments... 1m 04s elapsed - still working
+
+────────────────────────────────────────────────────────────────────────
+  major [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/device/models.ts:55src/device/models.ts:55-61]8;;
+
+  Reuse the key constants instead of re-hardcoding them.
+
+  powerValues and detectGeneration duplicate the literals already
+  exported from keys.ts; a future key correction would silently
+  desynchronise these two functions from the rest of the registry.
+
+
+
+
+
+  ♻️ Proposed refactor
+
+       case ApiGeneration.Gen2: return { key: Gen2Key.POWER, on: 'ON', off: 'OFF' }
+       case ApiGeneration.Gen3: return { key: Gen3Key.POWER, on: 1, off: 0 }
+       default: return { key: Gen1Key.POWER, on: '1', off: '0' }
+
+  -  if ('D03102' in status) return ApiGeneration.Gen3
+  -  if ('D03-02' in status) return ApiGeneration.Gen2
+  +  if (Gen3Key.POWER in status) return ApiGeneration.Gen3
+  +  if (Gen2Key.POWER in status) return ApiGeneration.Gen2
+
+  Also applies to: 901-905
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Functional Correctness]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/device/keys.ts:81src/device/keys.ts:81-82]8;;
+
+  BEEP aliasing DISPLAY_BACKLIGHT collides for AC2729.
+
+  Both constants resolve to uil, and models.ts AC2729 lists
+  Gen1Key.BEEP in switches (Line 559) and Gen1Key.DISPLAY_BACKLIGHT in
+  lights (Line 560). Downstream accessory wiring keyed by device key will
+  therefore expose two HomeKit controls that write and read the same field,
+  so toggling the beep switch will also flip the reported backlight state
+  (and vice versa). Please confirm the upstream registry really shares this
+  key for AC2729, and if so de-duplicate at the accessory layer (or drop one
+  entity) rather than exposing both.
+
+  ha-philips-airpurifier const.py PhilipsApi BEEP uil AC2729
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/device/models.ts:888src/device/models.ts:888-895]8;;
+
+  Unsafe indexed lookup: inherited Object.prototype members resolve as
+  configs.
+
+  model comes from the device's reported modelid, so a value like
+  constructor, toString, or __proto__ (or a 6-character prefix that
+  collides) returns a truthy inherited member instead of undefined. The
+  ?? fallback never fires and downstream code receives a function/object
+  with no apiGeneration, speeds, etc. Use a null-prototype map or
+  Object.hasOwn guards.
+
+
+
+
+
+  🛡️ Proposed fix
+
+   export function resolveModel(
+     model: string,
+     fallbackGeneration: ApiGeneration = ApiGeneration.Gen1,
+   ): DeviceModelConfig {
+  -  return DEVICE_MODELS[model]
+  -    ?? DEVICE_MODELS[model.slice(0, 6)]
+  -    ?? config({ apiGeneration: fallbackGeneration })
+  +  const lookup = (key: string): DeviceModelConfig | undefined =>
+  +    Object.hasOwn(DEVICE_MODELS, key) ? DEVICE_MODELS[key] : undefined
+  +  return lookup(model)
+  +    ?? lookup(model.slice(0, 6))
+  +    ?? config({ apiGeneration: fallbackGeneration })
+   }
+
+Writing review comments... 2m 32s elapsed - still working - 3 findings so far
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/ui.test.ts:43test/ui.test.ts:43-52]8;;
+
+  Add coverage for the port validation branch.
+
+  probeRequest validates payload.port (server.js Lines 49-52), but no
+  test exercises it, so a regression that drops the range check would go
+  unnoticed.
+
+
+  💚 Suggested test
+
+    it('rejects an out-of-range port before probing', async () => {
+      const probe = vi.fn()
+  
+      await expect(probeRequest({ host: '192.168.1.20', port: 70000 }, { probeHost: probe }))
+        .rejects.toBeInstanceOf(RequestError)
+      expect(probe).not.toHaveBeenCalled()
+    })
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/ui.test.ts:225test/ui.test.ts:225-241]8;;
+
+  Source-text assertions are brittle.
+
+  Grepping index.html for identifiers passes even if the strings appear
+  only in comments, and it breaks on harmless reformatting. Acceptable as a
+  cheap guardrail, but consider replacing with jsdom-based behavioural tests
+  if this file keeps changing.
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Data Integrity & Integration]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/config.schema.json:16config.schema.json:16-57]8;;
+
+  Declare model in the device schema.
+
+  addDeviceToConfig in homebridge-ui/public/config-ops.js (Line 20)
+  persists a model field on every device entry, and index.html renders
+  it, but the schema does not declare it. Since index.html also calls
+  homebridge.showSchemaForm(), any subsequent schema-form edit risks
+  dropping the undeclared key, and the configured-device cards would
+  silently lose their model label.
+
+
+  🔧 Proposed schema addition
+
+               "name": {
+                 "title": "Name",
+                 "type": "string"
+               },
+  +            "model": {
+  +              "title": "Model",
+  +              "type": "string"
+  +            },
+               "port": {
+
+  Does the Homebridge config UI schema form preserve config properties not declared in config.schema.json?
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/docs/superpowers/plans/2026-07-30-homebridge-philips-air.md:3904docs/superpowers/plans/2026-07-30-homebridge-philips-air.md:3904-3910]8;;
+
+  Do not disable SSH verification or pass the root password on the command
+  line.
+
+  StrictHostKeyChecking=no permits a LAN MITM, while sshpass -p exposes
+  UNRAID_PASS to local process inspection. Use pinned known_hosts
+  verification and SSH key-based authentication instead.
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/homebridge-ui/public/index.html:101homebridge-ui/public/index.html:101-112]8;;
+
+  Revert the checkbox when the save fails.
+
+  setDeviceToggle throws when the host is no longer configured, and
+  saveConfig can fail too. runBusy shows the error, but the checkbox
+  keeps its new visual state, so the panel then misrepresents the saved
+  config until a full reload. Re-render on failure.
+
+
+  🩹 Proposed fix
+
+  -    input.addEventListener('change', () => void runBusy(async () => {
+  -      await mutateConfig(blocks => setDeviceToggle(blocks, host, key, input.checked))
+  -      say('Saved. Restart Homebridge to apply.', 'success')
+  -    }, 'Could not save the setting.'))
+  +    input.addEventListener('change', () => void runBusy(async () => {
+  +      try {
+  +        await mutateConfig(blocks => setDeviceToggle(blocks, host, key, input.checked))
+  +      } catch (error) {
+  +        await renderConfigured()
+  +        throw error
+  +      }
+  +      say('Saved. Restart Homebridge to apply.', 'success')
+  +    }, 'Could not save the setting.'))
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/docs/superpowers/specs/2026-07-30-homebridge-philips-air-design.md:310docs/superpowers/specs/2026-07-30-homebridge-philips-air-design.md:310-311]8;;
+
+  Align the Lightbulb contract with the planned implementation.
+
+  The design promises brightness mapping for lamp modes 1 and 2, but the
+  planned setupLight() only wires On. Either implement and test
+  Brightness, or remove this promise from the design.
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/ui.test.ts:21test/ui.test.ts:21-24]8;;
+
+  Prefer explicit type assertions over matching constructor.
+
+  toMatchObject({ constructor: RequestError, ... }) relies on
+  prototype-chain lookup to assert the type, which is easy to misread and
+  silently weakens if the shape changes. Splitting the type and message
+  assertions is clearer.
+
+
+  ♻️ Proposed change
+
+  -    await expect(probeRequest({ host: '192.168.1.999' }, { probeHost: probe })).rejects.toMatchObject({
+  -      constructor: RequestError,
+  -      message: '"192.168.1.999" is not a valid IPv4 address.',
+  -    })
+  +    const rejection = probeRequest({ host: '192.168.1.999' }, { probeHost: probe })
+  +    await expect(rejection).rejects.toBeInstanceOf(RequestError)
+  +    await expect(rejection).rejects.toThrow('"192.168.1.999" is not a valid IPv4 address.')
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/docs/superpowers/plans/2026-07-30-homebridge-philips-air.md:3690docs/superpowers/plans/2026-07-30-homebridge-philips-air.md:3690-3751]8;;
+
+  Do not inject discovery responses into innerHTML.
+
+  device.model, device.name, firmware, and the JSON used in data-add
+  originate from UDP discovery responses. A host on the local network can
+  return HTML or attribute-breaking content and execute script in the
+  Homebridge admin UI.
+
+  Render values with DOM APIs and textContent; keep discovered device
+  objects in a map keyed by an opaque ID rather than embedding JSON in an
+  HTML attribute.
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Functional Correctness]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/airctrl/client.ts:219src/airctrl/client.ts:219-228]8;;
+
+  Do not stop control retries after the first failed resync.
+
+  A timeout on the first control request followed by one failed connect()
+  returns false immediately, so the default five retries are never
+  attempted. Continue retrying/resyncing while budget remains, and add a
+  regression test where a later resync succeeds.
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/docs/superpowers/plans/2026-07-30-homebridge-philips-air.md:3426docs/superpowers/plans/2026-07-30-homebridge-philips-air.md:3426-3451]8;;
+
+  Preserve configured devices when initial connection fails.
+
+  setUpDevice() awaits coordinator.start(), so a failed initial
+  connection throws before a UUID is added to configuredUuids. The cached
+  accessory is then pruned, and the failed coordinator never starts a
+  reconnect chain. This directly contradicts the corrected
+  startup-availability requirement.
+
+  Keep configured/cached accessories registered independently of initial
+  connectivity, and start reconnect handling after startup failure.
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/homebridge-ui/public/index.html:172homebridge-ui/public/index.html:172-183]8;;
+
+  Guard against a malformed /scan response shape.
+
+  devices.length throws a TypeError if the handler ever returns without
+  a devices array, which runBusy then surfaces as the generic "Scan
+  failed." message, hiding the real cause. A default in the destructuring
+  keeps the message accurate.
+
+
+  ♻️ Proposed tweak
+
+  -    const { subnet, scanned, devices } = await homebridge.request('/scan')
+  +    const { subnet, scanned, devices = [] } = await homebridge.request('/scan')
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/docs/superpowers/plans/2026-07-30-homebridge-philips-air.md:4063docs/superpowers/plans/2026-07-30-homebridge-philips-air.md:4063-4067]8;;
+
+  Make the protocol-invariant gate fail closed.
+
+  grep -n '& 0xFFFFFFFF' src/ targets a directory, fails, and the `||
+  echo branch reports success. The D03105` check also matches comments,
+  not actual light-control writes. Use recursive checks that fail on a
+  match, plus behavioural tests for the mappings.
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/homebridge-ui/server.js:54homebridge-ui/server.js:54-60]8;;
+
+  Preserve the probe failure cause for diagnostics.
+
+  Unlike scanRequest (Lines 30-33), this catch discards the underlying
+  error entirely, so a genuine socket/decrypt fault is indistinguishable
+  from a wrong IP in the Homebridge logs. Log the cause before converting.
+
+
+  ♻️ Proposed change
+
+     let device
+     try {
+       const { probeHost } = dependencies ?? await loadDiscovery()
+       device = await probeHost(host, requestedPort, 4000)
+  -  } catch {
+  +  } catch (error) {
+  +    console.error(`[PhilipsAir UI] probe ${host}:${requestedPort} failed:`, error)
+       throw requestError(`Could not probe ${host}. Check the IP and try again.`)
+     }
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/scripts/coap-spike.mjs:137scripts/coap-spike.mjs:137-195]8;;
+
+  Extract the shared Uri-Path/Observe option builder.
+
+  request() and observe() duplicate the path-splitting and Observe
+  option construction, and both duplicate the token/handler registration
+  dance. A small pathOptions(path) helper (plus a shared
+  registerHandler) would remove the drift risk.
+
+  Also note request({ observe: true }) never deletes its handler entry, so
+  that branch leaks a handler if it is ever used; only the default `observe:
+  false` path is exercised today.
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/scripts/README.md:36scripts/README.md:36-38]8;;
+
+  Uninstall step won't run if the probe fails.
+
+  The && chain skips npm uninstall coap whenever the script exits
+  non-zero, leaving a stray devDependency and a dirty
+  package.json/lockfile. Separate the cleanup so it always runs.
+
+
+
+
+
+
+  📝 Proposed doc fix
+
+  -npm i -D coap && node scripts/explore.mjs 192.168.20.151 && npm uninstall coap
+  +npm i -D coap && node scripts/explore.mjs 192.168.20.151; npm uninstall coap
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Data Integrity & Integration]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/scripts/gen-tasks.mjs:90scripts/gen-tasks.mjs:90-91]8;;
+
+  Missing lastUpdated argument is dropped silently.
+
+  With no process.argv[2], JSON.stringify omits the key entirely and the
+  generated .tasks.json loses its timestamp without any warning. Fail fast
+  or default to the current time.
+
+
+
+
+
+
+  🛡️ Proposed fix
+
+  -const out = { planPath: PLAN, tasks, lastUpdated: process.argv[2] }
+  +const lastUpdated = process.argv[2] ?? new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+  +const out = { planPath: PLAN, tasks, lastUpdated }
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/scripts/coap-spike.mjs:12scripts/coap-spike.mjs:12-13]8;;
+
+  Write the CoAP method codes as plain integers.
+
+  0.01 * 100 relies on float rounding happening to land exactly on 1,
+  and reads oddly next to CODE_POST = 2. Use the literal values (class 0,
+  detail 01/02).
+
+
+
+
+
+
+  ♻️ Proposed tidy-up
+
+  -const CODE_GET = 0.01 * 100 // 1
+  -const CODE_POST = 2
+  +const CODE_GET = 1 // 0.01
+  +const CODE_POST = 2 // 0.02
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Functional Correctness]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/scripts/gen-tasks.mjs:47scripts/gen-tasks.mjs:47-66]8;;
+
+  Clamp the task slice to the next heading, and handle a missing Acceptance
+  Criteria header explicitly.
+
+  sections() searches for Steps: across the whole remainder of the
+  document, so a task missing that marker silently absorbs the following
+  tasks' content. Similarly, when Acceptance Criteria: is absent,
+  block.indexOf(...) returns -1 and block.slice(-1) happens to yield
+  an empty criteria list — correct only by accident, and it reports the
+  wrong cause via the Line 72 error.
+
+
+
+
+
+
+  ♻️ Proposed fix
+
+   function sections(id) {
+     const start = doc.indexOf(`### Task ${id}:`)
+     if (start === -1) throw new Error(`Task ${id} heading not found in ${PLAN}`)
+  -  const body = doc.slice(start)
+  +  const nextHeading = doc.indexOf('\n### Task ', start + 1)
+  +  const body = nextHeading === -1 ? doc.slice(start) : doc.slice(start, nextHeading)
+     const end = body.indexOf('**Steps:**')
+     if (end === -1) throw new Error(`Task ${id} has no **Steps:** marker`)
+     // Drop the heading line, keep everything up to Steps.
+     return body.slice(body.indexOf('\n') + 1, end).trim()
+   }
+   
+   /** Acceptance criteria as plain strings, for the metadata array. */
+   function criteria(block) {
+     const start = block.indexOf('**Acceptance Criteria:**')
+  +  if (start === -1) throw new Error('block has no **Acceptance Criteria:** marker')
+     const rest = block.slice(start)
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/scripts/explore.mjs:88scripts/explore.mjs:88-99]8;;
+
+  A failing restore write aborts the rest of the restore.
+
+  write() rejects on timeout, so one flaky restore leaves the remaining
+  keys — including power — at probe values and skips the drift report,
+  contradicting the "restores every value they touch" guarantee. Also,
+  process.exit(0) in finally swallows the original failure's exit code.
+
+
+
+
+
+
+  🛡️ Proposed hardening
+
+   } finally {
+     console.log('\n=== restoring originals ===')
+  +  let failed = false
+     for (const k of ['D03130', 'D03103', 'D03105', 'D0310C', 'D03102']) {
+       if (ORIGINAL[k] === undefined) continue
+  -    const ok = await write(k, ORIGINAL[k])
+  -    console.log(`  ${k} -> ${JSON.stringify(ORIGINAL[k])} ack=${ok} readback=${JSON.stringify(latest[k])}`)
+  +    try {
+  +      const ok = await write(k, ORIGINAL[k])
+  +      console.log(`  ${k} -> ${JSON.stringify(ORIGINAL[k])} ack=${ok} readback=${JSON.stringify(latest[k])}`)
+  +    } catch (error) {
+  +      failed = true
+  +      console.error(`  !! ${k} restore failed: ${error.message}`)
+  +    }
+     }
+     const drift = WATCH.filter(k => JSON.stringify(latest[k]) !== JSON.stringify(ORIGINAL[k]))
+     console.log(drift.length ? `!! DRIFT: ${drift.map(k => `${k}: ${ORIGINAL[k]} -> ${latest[k]}`).join(', ')}` : 'all watched keys restored')
+     stream.close?.()
+  -  process.exit(0)
+  +  process.exit(failed || drift.length ? 1 : 0)
+   }
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/coap-socket.test.ts:11test/coap-socket.test.ts:11-24]8;;
+
+  This duplicates test/helpers/fake-device.ts.
+
+  The same PR adds a shared fake device helper (with request capture,
+  observe tracking and push). Two divergent fakes for the same protocol
+  will drift. Prefer extending the helper (e.g. add a raw-datagram escape
+  hatch for the malformed-datagram test) and deleting this local copy.
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/coap-message.test.ts:88test/coap-message.test.ts:88-95]8;;
+
+  Extension nibbles are only covered for option length, not option delta.
+
+  Every option used here (Observe 6, Uri-Path 11, Max-Age 14) yields a delta
+  below 13, so the 13/14 nibble path for option numbers is never exercised.
+  A round-trip with a large option number (e.g. 2048, or Uri-Path plus
+  Block2/Size2) would close that gap.
+
+
+
+
+
+
+  💚 Suggested additional case
+
+  it.each([2048, 65535 + 269])('round-trips a high option number %i', (number) => {
+    const decoded = decode(encode({
+      code: CoapCode.GET,
+      messageId: 1,
+      options: [{ number: CoapOption.UriPath, value: Buffer.from('a') }, { number, value: Buffer.from('b') }],
+    }))
+    expect(decoded.options.at(-1)!.number).toBe(number)
+  })
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/coap-socket.test.ts:153test/coap-socket.test.ts:153-155]8;;
+
+  Replace fixed sleeps with polling assertions.
+
+  await new Promise(r => setTimeout(r, 100)) is both slower than needed
+  and flaky on loaded CI. vi.waitFor (or expect.poll) expresses the
+  intent directly; the negative case at Line 182-184 still needs a short
+  settle, but the positive case at Line 153-155 should poll.
+
+
+
+
+
+
+  ♻️ Poll instead of sleeping
+
+       saved!.reply({ code: CONTENT_2_05, messageId: 99, token: saved!.token, payload: Buffer.from('second') })
+  -    await new Promise(resolve => setTimeout(resolve, 100))
+  -    expect(pushes).toEqual(['second'])
+  +    await vi.waitFor(() => expect(pushes).toEqual(['second']))
+
+  Also applies to: 182-184
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/airctrl/coap/socket.ts:108src/airctrl/coap/socket.ts:108]8;;
+
+  Drop the misleading as string cast.
+
+  payload is string | Buffer; the cast lies about the type just to
+  satisfy the overload. Buffer.from accepts both if you narrow instead.
+
+
+
+
+
+
+  ♻️ Narrow rather than cast
+
+  -      payload: payload === undefined ? undefined : Buffer.from(payload as string),
+  +      payload: payload === undefined
+  +        ? undefined
+  +        : (Buffer.isBuffer(payload) ? payload : Buffer.from(payload, 'utf8')),
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/helpers/fake-device.ts:96test/helpers/fake-device.ts:96-99]8;;
+
+  push mixes a synchronous throw with a Promise-returning signature.
+
+  Callers doing device.push(...).catch(...) will not catch the "no active
+  observer" case. Reject instead, so failure handling is uniform.
+
+
+
+
+
+
+  ♻️ Reject rather than throw
+
+       push(payload, options = []) {
+  -      if (!observer) throw new Error('no active observer')
+  +      if (!observer) return Promise.reject(new Error('no active observer'))
+         return send(observer.token, observer.remote, payload, options)
+       },
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/crypto.test.ts:40test/crypto.test.ts:40-44]8;;
+
+  Add a malformed/truncated blob case for decrypt.
+
+  Only digest tampering is covered. A blob shorter than key+digest, or one
+  with odd-length hex, is the realistic wire-corruption case and is the path
+  most likely to throw something other than a domain error (e.g. an OpenSSL
+  error) out of the client.
+
+
+
+
+
+
+  💚 Suggested cases
+
+  it.each(['', '0DC377BA', 'ZZZZ'])('rejects a malformed blob %j', (blob) => {
+    expect(() => decrypt(blob)).toThrow()
+  })
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Security & Privacy]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/airctrl/coap/socket.ts:74src/airctrl/coap/socket.ts:74-82]8;;
+
+  Datagrams are accepted from any source address.
+
+  The socket is unconnected, so dispatch will happily deliver any datagram
+  whose 4-byte token matches an in-flight request — including one from an
+  unrelated host on the LAN. Cheap hardening: drop datagrams whose rinfo
+  does not match the configured host/port (the message event already
+  provides it), or socket.connect(port, host) so the kernel filters for
+  you.
+
+
+
+
+
+
+  🛡️ Proposed source filtering
+
+  -    this.socket.on('message', buffer => this.dispatch(buffer))
+  +    this.socket.on('message', (buffer, remote) => {
+  +      if (remote.address !== this.host || remote.port !== this.port) return
+  +      this.dispatch(buffer)
+  +    })
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/schema.test.ts:8test/schema.test.ts:8]8;;
+
+  Derive the expected key count from the fixture.
+
+  The hard-coded 59 breaks whenever the fixture is regenerated, and the
+  failure message won't explain why. Asserting against the fixture itself
+  states the actual invariant: no keys are stripped.
+
+
+
+
+
+
+  ♻️ Assert the invariant instead of the count
+
+  -    expect(Object.keys(reported)).toHaveLength(59)
+  +    expect(Object.keys(reported).sort()).toEqual(Object.keys(fixture).sort())
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/discovery.test.ts:204test/discovery.test.ts:204-282]8;;
+
+  No coverage for the default (interface-derived) discover() path.
+
+  Every case here passes hosts or subnet, so
+  localSubnets().flatMap(...) on discovery.ts Line 127 is never
+  executed. node:os is already mocked in this file, so asserting the
+  derived host set — and the oversized-interface behaviour flagged on
+  discovery.ts Lines 124-127 — is cheap.
+
+
+
+
+
+
+  💚 Suggested test
+
+  it('derives hosts from local interfaces and tolerates oversized ones', async () => {
+    vi.mocked(networkInterfaces).mockReturnValue({
+      en0: [{
+        address: '127.0.0.1',
+        netmask: '255.255.255.252',
+        family: 'IPv4',
+        mac: '00:00:00:00:00:00',
+        internal: false,
+        cidr: '127.0.0.1/30',
+      }],
+      en1: [{
+        address: '169.254.10.5',
+        netmask: '255.255.0.0',
+        family: 'IPv4',
+        mac: '00:00:00:00:00:00',
+        internal: false,
+        cidr: '169.254.10.5/16',
+      }],
+    })
+    const device = await startFakeDevice(() => ({
+      payload: JSON.stringify({ modelid: 'AC4220/12', name: 'Office' }),
+    }))
+    devices.push(device)
+  
+    await expect(discover({ port: device.port, timeoutMs: 100, concurrency: 2 }))
+      .resolves.toEqual([{ host: '127.0.0.1', model: 'AC4220/12', name: 'Office' }])
+  })
+
+  Note this test only passes once the flatMap guard is added; today it
+  rejects with a RangeError.
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/coordinator.test.ts:160test/coordinator.test.ts:160-192]8;;
+
+  Add coverage for retryStart().
+
+  retryStart() is public API added specifically for the
+  failed-initial-start() path (coordinator.ts Lines 48-54) and no test
+  exercises it. A regression that drops the arming of the backoff loop there
+  would leave the coordinator permanently idle, and this suite would stay
+  green.
+
+
+
+
+
+
+  💚 Suggested test
+
+  it('arms the reconnect loop after a failed initial start', async () => {
+    vi.useFakeTimers()
+    const first = controlledClient()
+    first.connect.mockRejectedValueOnce(new Error('connect failed'))
+    const replacement = controlledClient({ pwr: '0' }, 10)
+    const reconnectClient = vi.fn().mockResolvedValue(replacement)
+    const coordinator = new DeviceCoordinator(first, logging(), '192.0.2.1', reconnectClient)
+  
+    await expect(coordinator.start()).rejects.toThrow('connect failed')
+    coordinator.retryStart()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await flush()
+  
+    expect(reconnectClient).toHaveBeenCalledOnce()
+    expect(coordinator.available).toBe(true)
+    coordinator.shutdown()
+  })
+
+  Also applies to: 247-277, 294-326
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/airctrl/discovery.ts:142src/airctrl/discovery.ts:142]8;;
+
+  Non-IPv4 entries in hosts make the final sort throw away every result.
+
+  options.hosts is unvalidated, so a hostname (e.g. air.local) can be
+  probed successfully; ipv4ToInt then raises RangeError from the
+  comparator and discover() rejects after all the probing work has
+  completed.
+
+
+
+
+
+
+  🐛 Proposed fix
+
+  +function sortKey(host: string): number {
+  +  try {
+  +    return ipv4ToInt(host)
+  +  } catch {
+  +    return Number.POSITIVE_INFINITY
+  +  }
+  +}
+  +
+  @@
+  -  return found.sort((a, b) => ipv4ToInt(a.host) - ipv4ToInt(b.host))
+  +  return found.sort((a, b) => sortKey(a.host) - sortKey(b.host))
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/airctrl/discovery.ts:124src/airctrl/discovery.ts:124-127]8;;
+
+  One oversized local interface aborts the entire default scan.
+
+  hostsInSubnet throws for anything larger than 1,024 usable hosts, and
+  this flatMap has no per-CIDR guard. A machine with a /16 interface, or
+  the common APIPA 169.254.0.0/16 link-local address (which localSubnets
+  does not filter), makes the no-argument discover() reject instead of
+  scanning the interfaces that are in range — i.e. the UI "scan" path fails
+  outright on otherwise supported networks.
+
+
+
+
+
+
+  🛡️ Proposed fix — skip out-of-range subnets instead of failing
+
+  +function hostsInSubnetOrSkip(cidr: string): string[] {
+  +  try {
+  +    return [...hostsInSubnet(cidr)]
+  +  } catch {
+  +    return []
+  +  }
+  +}
+  +
+   export async function discover(options: DiscoverOptions = {}): Promise<DiscoveredDevice[]> {
+  @@
+     const hosts = options.hosts
+       ?? (options.subnet
+         ? [...hostsInSubnet(options.subnet)]
+  -      : localSubnets().flatMap(cidr => [...hostsInSubnet(cidr)]))
+  +      : localSubnets().flatMap(hostsInSubnetOrSkip))
+
+  Explicit subnet should keep throwing so misconfiguration stays visible.
+  Consider also excluding 169.254. in localSubnets.
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/device/coordinator.ts:56src/device/coordinator.ts:56-70]8;;
+
+  Isolate listener failures from the observe/reconnect control flow.
+
+  emit() invokes listeners synchronously, so a throwing
+  status/availability consumer propagates out of ingest(). From Line
+  148 that lands in the loop's catch, marking the device unavailable and
+  cycling the connection; from Line 235 it aborts a successful reconnect and
+  closes the fresh client. A consumer bug should not degrade transport
+  state.
+
+
+
+
+
+
+  ♻️ Suggested guard
+
+  +  private safeEmit(event: string, payload: unknown): void {
+  +    try {
+  +      this.emit(event, payload)
+  +    } catch (error) {
+  +      this.log.error(`${this.host} ${event} listener failed: ${String(error)}`)
+  +    }
+  +  }
+  +
+     ingest(status: DeviceStatus): void {
+  @@
+       this.lastStatus = status
+  -    this.emit('status', status)
+  +    this.safeEmit('status', status)
+     }
+
+  Apply the same treatment to the availability emits on Lines 77 and 84.
+
+
+────────────────────────────────────────────────────────────────────────
+  critical [Functional Correctness]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/test/platform.test.ts:349test/platform.test.ts:349]8;;
+
+  toHaveLength on a Set does not work — it reads .length, which is
+  undefined.
+
+  Set exposes .size, so this assertion cannot pass as written. Assert on
+  .size instead.
+
+
+  🐛 Proposed fix
+
+  -    expect((platform as unknown as { coordinators: Set<unknown> }).coordinators).toHaveLength(0)
+  +    expect((platform as unknown as { coordinators: Set<unknown> }).coordinators.size).toBe(0)
+
+  vitest toHaveLength Set size undefined
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/platform.ts:190src/platform.ts:190-202]8;;
+
+  Poisoned handlers are never torn down; recovery depends on attach
+  happening to re-register the same characteristics.
+
+  markOffline installs throwing onGet/onSet on every characteristic of
+  every non-information service. PhilipsAirAccessory only re-registers
+  handlers for the characteristics it wires (onGet via this.onGet,
+  onSet on a fixed set). Any cached characteristic outside that
+  intersection keeps throwing SERVICE_COMMUNICATION_FAILURE after the
+  device recovers, with no way back short of a Homebridge restart.
+
+  Consider recording the characteristics poisoned per accessory and clearing
+  their handlers (removeOnGet() / removeOnSet()) at the start of
+  attach, rather than relying on overlap.
+
+
+────────────────────────────────────────────────────────────────────────
+  minor [Functional Correctness]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/accessory.ts:447src/accessory.ts:447-459]8;;
+
+  life === 0 conflates "filter empty" with "reading invalid or missing",
+  producing false replace-filter alerts.
+
+  filterLifePercent returns 0 for non-numeric, non-finite, or total <= 0
+  inputs, so a malformed report surfaces as CHANGE_FILTER in the Home app.
+  Consider having the mapper signal unknown separately (e.g. null) and
+  leaving the previous indication untouched in that case.
+
+
+────────────────────────────────────────────────────────────────────────
+  major [Stability & Availability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/accessory.ts:130src/accessory.ts:130-178]8;;
+
+  Optional services are gated on a single first status snapshot, and cached
+  services are destroyed on the basis of it.
+
+  status here is only the first snapshot the coordinator obtained. If that
+  report omits temperature/humidity/filter keys (a partial or slow first
+  report), the sensors are not wired for the whole process lifetime and the
+  previously registered services are removed from the cached accessory
+  (Lines 141, 155, 166, 177), losing the user's HomeKit room and automation
+  assignments permanently. Later status events never re-evaluate the gate.
+
+  Consider deferring removal until a key has been absent across several
+  reports, or accumulating the union of keys seen so far and only pruning
+  services that the model registry says are unsupported.
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Maintainability & Code Quality]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/platform.ts:133src/platform.ts:133-137]8;;
+
+  Log when a device is dropped because another host already owns its UUID.
+
+  A duplicate device id (same purifier reachable on two configured hosts, or
+  a device reporting a non-unique id) silently discards the coordinator with
+  no diagnostic, so the user sees a configured device simply never appear. A
+  log.warn naming both hosts makes this self-diagnosing.
+
+
+  🔍 Proposed change
+
+         const accessoryUuid = this.api.hap.uuid.generate(accessoryUuidSeed(device, deviceId))
+         if (!this.claim(accessoryUuid, device.host)) {
+  +        this.log.warn(
+  +          `Ignoring device at ${device.host}: its id is already claimed by `
+  +          + `${this.claimed.get(accessoryUuid)}`,
+  +        )
+           this.discard(coordinator)
+           return
+         }
+
+
+────────────────────────────────────────────────────────────────────────
+  trivial [Performance & Scalability]
+  → ]8;;vscode://file//Users/ruaandeysel/Github/homebridge-philips-air/.claude/worktrees/philips-air-impl/src/platform.ts:68src/platform.ts:68-79]8;;
+
+  Device setup is fully serialised, so each unreachable host adds its full
+  connect timeout to startup.
+
+  await this.setUpDevice(device) inside the loop means N offline devices
+  delay the last device's accessory by N timeouts. Since each setup is
+  independent, running them concurrently and awaiting settlement would keep
+  startup bounded by the slowest single device.
+
+
+  ♻️ Concurrent setup
+
+  -    const seenHosts = new Set<string>()
+  -    for (const device of devices) {
+  -      if (this.shuttingDown) break
+  -      if (seenHosts.has(device.host)) continue
+  -      seenHosts.add(device.host)
+  -      // A single bad device must never take the platform down.
+  -      try {
+  -        await this.setUpDevice(device)
+  -      } catch (error) {
+  -        this.log.error(`Failed to set up device at ${device.host}: ${String(error)}`)
+  -      }
+  -    }
+  +    const seenHosts = new Set<string>()
+  +    const unique = devices.filter(device => {
+  +      if (seenHosts.has(device.host)) return false
+  +      seenHosts.add(device.host)
+  +      return true
+  +    })
+  +    // A single bad device must never take the platform down.
+  +    await Promise.all(unique.map(async device => {
+  +      if (this.shuttingDown) return
+  +      try {
+  +        await this.setUpDevice(device)
+  +      } catch (error) {
+  +        this.log.error(`Failed to set up device at ${device.host}: ${String(error)}`)
+  +      }
+  +    }))
+
+  Note this changes attach ordering, so the duplicate-device-id claim test
+  (test/platform.test.ts Line 364) becomes non-deterministic in which host
+  wins — worth confirming that is acceptable before adopting.
+
+
+────────────────────────────────────────
+Review complete
+41 findings ✔
+
+Critical 1
+Major    15
+Minor    7
+Trivial  18
+
+47 files reviewed:
+- .gitignore
+- config.schema.json
+- docs/superpowers/plans/2026-07-30-homebridge-philips-air.md
+- docs/superpowers/plans/2026-07-30-homebridge-philips-air.md.tasks.json
+- docs/superpowers/specs/2026-07-30-homebridge-philips-air-design.md
+- eslint.config.js
+- homebridge-ui/public/config-ops.js
+- homebridge-ui/public/index.html
+- homebridge-ui/server.js
+- package-lock.json
+... and 37 more files
+────────────────────────────────────────
+
+Print all AI prompts: coderabbit review --show-prompts

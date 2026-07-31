@@ -87,13 +87,27 @@ try {
   await probe('D03105', [1, 2, 3, 0])
 } finally {
   console.log('\n=== restoring originals ===')
+  let restoreFailed = false
   for (const k of ['D03130', 'D03103', 'D03105', 'D0310C', 'D03102']) {
     if (ORIGINAL[k] === undefined) continue
-    const ok = await write(k, ORIGINAL[k])
-    console.log(`  ${k} -> ${JSON.stringify(ORIGINAL[k])} ack=${ok} readback=${JSON.stringify(latest[k])}`)
+    // Attempt every restore even if an earlier one throws — a failed light
+    // restore must never skip the power restore that follows it.
+    try {
+      const ok = await write(k, ORIGINAL[k])
+      console.log(`  ${k} -> ${JSON.stringify(ORIGINAL[k])} ack=${ok} readback=${JSON.stringify(latest[k])}`)
+      if (!ok) restoreFailed = true
+    } catch (error) {
+      restoreFailed = true
+      console.log(`  ${k} -> ${JSON.stringify(ORIGINAL[k])} FAILED: ${error instanceof Error ? error.message : error}`)
+    }
   }
   const drift = WATCH.filter(k => JSON.stringify(latest[k]) !== JSON.stringify(ORIGINAL[k]))
-  console.log(drift.length ? `!! DRIFT: ${drift.map(k => `${k}: ${ORIGINAL[k]} -> ${latest[k]}`).join(', ')}` : 'all watched keys restored')
+  if (drift.length) {
+    restoreFailed = true
+    console.log(`!! DRIFT: ${drift.map(k => `${k}: ${ORIGINAL[k]} -> ${latest[k]}`).join(', ')}`)
+  } else {
+    console.log('all watched keys restored')
+  }
   stream.close?.()
-  process.exit(0)
+  process.exitCode = restoreFailed ? 1 : 0
 }

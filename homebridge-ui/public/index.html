@@ -1,0 +1,217 @@
+<style>
+  .pa-row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .5rem; }
+  .pa-card { border: 1px solid rgba(128, 128, 128, .3); border-radius: 6px; padding: .75rem; margin-bottom: .5rem; }
+  .pa-muted { opacity: .7; font-size: .85rem; }
+  .pa-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .25rem .75rem; }
+  .pa-status { min-height: 1.4rem; }
+  .pa-spread { justify-content: space-between; }
+  .pa-manual { max-width: 22rem; }
+</style>
+
+<div class="pa-row">
+  <button class="btn btn-primary" id="scan" type="button">Scan network</button>
+  <span class="pa-muted" id="subnet"></span>
+</div>
+
+<form class="pa-row" id="manual-form">
+  <label for="manual-host">Device IP</label>
+  <input class="form-control pa-manual" id="manual-host" inputmode="decimal"
+    placeholder="e.g. 192.168.20.151" required>
+  <button class="btn btn-secondary" type="submit">Add</button>
+</form>
+
+<div class="pa-status" id="status" aria-live="polite"></div>
+<div id="found"></div>
+
+<h5 class="mt-3">Configured devices</h5>
+<div id="configured"></div>
+
+<script type="module">
+  import {
+    addDeviceToConfig,
+    createConfigMutator,
+    deviceTitle,
+    ensureConfig,
+    removeDeviceFromConfig,
+    setDeviceToggle,
+  } from './config-ops.js'
+
+  const statusEl = document.getElementById('status')
+  const foundEl = document.getElementById('found')
+  const configuredEl = document.getElementById('configured')
+  const scanButton = document.getElementById('scan')
+  const manualForm = document.getElementById('manual-form')
+  const manualHost = document.getElementById('manual-host')
+
+  function textElement(tag, className, text) {
+    const element = document.createElement(tag)
+    if (className) element.className = className
+    element.textContent = text
+    return element
+  }
+
+  function say(message, kind = 'muted') {
+    const className = {
+      danger: 'text-danger',
+      success: 'text-success',
+      warning: 'text-warning',
+      muted: 'pa-muted',
+    }[kind] || 'pa-muted'
+    if (message) statusEl.replaceChildren(textElement('span', className, message))
+    else statusEl.replaceChildren()
+  }
+
+  function errorMessage(error, fallback) {
+    return error instanceof Error && error.message ? error.message : fallback
+  }
+
+  async function runBusy(action, fallback) {
+    homebridge.showSpinner()
+    try {
+      await action()
+    } catch (error) {
+      say(errorMessage(error, fallback), 'danger')
+    } finally {
+      homebridge.hideSpinner()
+    }
+  }
+
+  async function currentConfig() {
+    return ensureConfig(await homebridge.getPluginConfig())
+  }
+
+  async function saveConfig(blocks) {
+    await homebridge.updatePluginConfig(blocks)
+    await homebridge.savePluginConfig()
+  }
+
+  const mutateConfig = createConfigMutator(currentConfig, saveConfig)
+
+  async function addDevice(device) {
+    const added = await mutateConfig(blocks => addDeviceToConfig(blocks, device))
+    if (!added) {
+      say(`${device.host} is already configured.`, 'warning')
+      return false
+    }
+    say(`Added ${deviceTitle(device)}. Restart Homebridge to apply.`, 'success')
+    await renderConfigured()
+    return true
+  }
+
+  function toggle(host, key, label, checked) {
+    const wrapper = document.createElement('label')
+    const input = document.createElement('input')
+    input.type = 'checkbox'
+    input.checked = checked
+    input.addEventListener('change', () => {
+      const next = input.checked
+      const previous = !next
+      void runBusy(async () => {
+        try {
+          await mutateConfig(blocks => setDeviceToggle(blocks, host, key, next))
+          say('Saved. Restart Homebridge to apply.', 'success')
+        } catch (error) {
+          input.checked = previous
+          throw error
+        }
+      }, 'Could not save the setting.')
+    })
+    wrapper.append(input, ` ${label}`)
+    return wrapper
+  }
+
+  async function renderConfigured() {
+    const blocks = await currentConfig()
+    const devices = blocks[0].devices
+    if (devices.length === 0) {
+      configuredEl.replaceChildren(textElement('p', 'pa-muted', 'None yet. Scan the network or add an IP above.'))
+      return
+    }
+
+    const cards = devices.map(device => {
+      const card = textElement('div', 'pa-card', '')
+      const heading = textElement('div', 'pa-row pa-spread', '')
+      const remove = textElement('button', 'btn btn-sm btn-danger', 'Remove')
+      remove.type = 'button'
+      remove.addEventListener('click', () => void runBusy(async () => {
+        const removed = await mutateConfig(blocks => removeDeviceFromConfig(blocks, device.host))
+        if (!removed) {
+          say(`${device.host} is already removed.`, 'warning')
+          await renderConfigured()
+          return
+        }
+        say('Removed. Restart Homebridge to apply.', 'success')
+        await renderConfigured()
+      }, 'Could not remove the device.'))
+      heading.append(textElement('strong', '', deviceTitle(device)), remove)
+
+      const detail = [device.host, device.model].filter(Boolean).join(' · ')
+      const grid = textElement('div', 'pa-grid mt-2', '')
+      grid.append(
+        toggle(device.host, 'exposeLight', 'Display light', device.exposeLight !== false),
+        toggle(device.host, 'exposeSleepSwitch', 'Sleep switch', !!device.exposeSleepSwitch),
+        toggle(device.host, 'exposeAutoPlusSwitch', 'Auto+ AI switch', !!device.exposeAutoPlusSwitch),
+        toggle(device.host, 'exposeBeepSwitch', 'Beep switch', !!device.exposeBeepSwitch),
+      )
+      card.append(heading, textElement('div', 'pa-muted', detail), grid)
+      return card
+    })
+    configuredEl.replaceChildren(...cards)
+  }
+
+  function renderFound(devices) {
+    const cards = devices.map(device => {
+      const card = textElement('div', 'pa-card pa-row pa-spread', '')
+      // Name, IP and model only. Firmware is deliberately not shown: /sys/dev/info
+      // reports swversion "0.0.0" on an AC4220/12 whose real firmware is 0.2.3
+      // (that lives in the status payload as D01S12), so it is misleading here.
+      const summary = textElement('span', '', '')
+      summary.append(
+        textElement('strong', '', deviceTitle(device)),
+        document.createElement('br'),
+        textElement('span', 'pa-muted', [device.host, device.model].filter(Boolean).join(' · ')),
+      )
+      const add = textElement('button', 'btn btn-sm btn-primary', 'Add')
+      add.type = 'button'
+      add.addEventListener('click', () => void runBusy(() => addDevice(device), 'Could not add the device.'))
+      card.append(summary, add)
+      return card
+    })
+    foundEl.replaceChildren(...cards)
+  }
+
+  async function scan() {
+    foundEl.replaceChildren()
+    say('Scanning…')
+    const { subnet, scanned, devices = [] } = await homebridge.request('/scan')
+    document.getElementById('subnet').textContent = `${subnet} (${scanned} addresses)`
+    if (devices.length === 0) {
+      say('No devices found. Try adding the IP manually.', 'warning')
+      return
+    }
+    renderFound(devices)
+    say(`Found ${devices.length} device(s).`, 'success')
+  }
+
+  scanButton.addEventListener('click', () => void runBusy(scan, 'Scan failed.'))
+
+  manualForm.addEventListener('submit', event => {
+    event.preventDefault()
+    void runBusy(async () => {
+      say('Probing…')
+      const { device } = await homebridge.request('/probe', { host: manualHost.value.trim() })
+      await addDevice(device)
+    }, 'Probe failed.')
+  })
+
+  // This panel owns the whole configuration, so the generated schema form is
+  // never shown — it would duplicate these controls and expose plumbing like
+  // the CoAP port, which only ever differs on non-standard firmware and can
+  // still be set via the JSON Config editor.
+  void runBusy(async () => {
+    await renderConfigured()
+    // Scan straight away: a fresh install has nothing configured, and the whole
+    // point of this panel is that setup needs no typing.
+    await scan()
+  }, 'Could not load the plugin configuration.')
+</script>

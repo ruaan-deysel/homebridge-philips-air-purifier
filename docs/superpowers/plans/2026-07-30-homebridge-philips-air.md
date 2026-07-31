@@ -1,4 +1,4 @@
-# homebridge-philips-air Implementation Plan
+# homebridge-philips-air-purifier Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers-extended-cc:subagent-driven-development (recommended) or superpowers-extended-cc:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -28,7 +28,7 @@
 
 **User decisions (already made):**
 - Presets map to **discrete `RotationSpeed` steps**, not one switch per preset and not a Television input selector.
-- v1 ports the full 61-model registry but claims **verified support only for AC4220/12** plus a generation-based generic fallback.
+- v1 ports the full 62-model registry but claims **verified support only for AC4220/12** plus a generation-based generic fallback.
 - Setup is **network scan with manual-IP fallback** in a custom UI, not manual-only and not a plain generated form.
 - Development uses a **local spike for the inner loop, then deploy to Unraid** — not deploy-every-iteration, not mock-first.
 - Code review uses **CodeRabbit CLI plus a Codex adversarial pass**.
@@ -36,7 +36,8 @@
 **Reference material** (read before starting, all verified against hardware):
 - `docs/superpowers/specs/2026-07-30-homebridge-philips-air-design.md` — the design
 - `test/fixtures/ac4220-12-status.json` — real 59-key device payload
-- `scripts/spike.mjs`, `scripts/explore.mjs`, `scripts/explore2.mjs` — working probes
+- `scripts/README.md` — what each probe script is and how to run it
+- `scripts/explore.mjs`, `scripts/explore2.mjs` — the probes that produced the hardware findings. They predate the `coap` dependency being dropped and need a throwaway `npm i -D coap` to run again; their findings are already in the spec.
 - `scripts/coap-spike.mjs` — **the working reference implementation of Tasks 2 and 4.** Contains a passing RFC 7252 codec, a `node:dgram` transport with token matching, and verified observe registration and cancellation against the real device. Port from this rather than writing from scratch.
 - Python source to port: clone `https://github.com/ruaan-deysel/philips-airctrl` and `https://github.com/ruaan-deysel/ha-philips-airpurifier`
 
@@ -54,7 +55,7 @@
 **Goal:** A buildable, testable, lintable Homebridge 2 plugin skeleton that registers an empty platform.
 
 **Files:**
-- Create: `package.json`, `tsconfig.json`, `eslint.config.js`, `vitest.config.ts`, `.npmignore`
+- Create: `package.json`, `tsconfig.json`, `eslint.config.js`, `vitest.config.ts`
 - Create: `src/settings.ts`, `src/index.ts`
 - Create: `test/scaffold.test.ts`
 
@@ -73,7 +74,7 @@
 
 ```json
 {
-  "name": "homebridge-philips-air",
+  "name": "homebridge-philips-air-purifier",
   "displayName": "Philips Air Purifier",
   "version": "0.1.0",
   "description": "HomeKit support for Philips air purifiers over encrypted CoAP, with no Python dependency.",
@@ -111,6 +112,8 @@
   "devDependencies": {
     "@eslint/js": "^9.0.0",
     "@types/node": "^24.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^9.0.0",
     "homebridge": "^2.2.1",
     "typescript": "^5.6.0",
@@ -157,22 +160,36 @@ export default defineConfig({
 })
 ```
 
+`js.configs.recommended` alone cannot parse TypeScript — type annotations are
+syntax errors to the default parser — so the TS parser and its `no-unused-vars`
+replacement are both required. The base rule must be switched off, or it
+double-reports on type-only references.
+
 ```javascript
 // eslint.config.js
 import js from '@eslint/js'
+import tsPlugin from '@typescript-eslint/eslint-plugin'
+import tsParser from '@typescript-eslint/parser'
 
 export default [
   js.configs.recommended,
   {
     files: ['**/*.ts'],
     languageOptions: {
+      parser: tsParser,
       ecmaVersion: 2022,
       sourceType: 'module',
     },
+    plugins: {
+      '@typescript-eslint': tsPlugin,
+    },
     rules: {
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      // The base rule cannot see type-only usages; the TS-aware one replaces it.
+      'no-unused-vars': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
     },
   },
+  // scripts/ holds standalone hardware probes, outside the build and the suite.
   { ignores: ['dist/**', 'node_modules/**', 'scripts/**'] },
 ]
 ```
@@ -181,10 +198,10 @@ export default [
 
 ```typescript
 /** Must match `pluginAlias` in config.schema.json. */
-export const PLATFORM_NAME = 'PhilipsAir'
+export const PLATFORM_NAME = 'PhilipsAirPurifier'
 
 /** Must match the `name` field in package.json. */
-export const PLUGIN_NAME = 'homebridge-philips-air'
+export const PLUGIN_NAME = 'homebridge-philips-air-purifier'
 ```
 
 - [ ] **Step 5: Create `src/index.ts`**
@@ -211,8 +228,8 @@ import { PLATFORM_NAME, PLUGIN_NAME } from '../src/settings.js'
 
 describe('scaffold', () => {
   it('exposes the platform and plugin names', () => {
-    expect(PLATFORM_NAME).toBe('PhilipsAir')
-    expect(PLUGIN_NAME).toBe('homebridge-philips-air')
+    expect(PLATFORM_NAME).toBe('PhilipsAirPurifier')
+    expect(PLUGIN_NAME).toBe('homebridge-philips-air-purifier')
   })
 })
 ```
@@ -400,10 +417,12 @@ Expected: PASS, 8 assertions across 5 test blocks.
 This proves the port matches the device, not just itself.
 
 ```bash
-node scripts/spike.mjs 192.168.20.151
+node scripts/coap-spike.mjs 192.168.20.151
 ```
 
-Expected: `[3] decrypt OK, keys = 59` — a digest mismatch would throw instead.
+Expected: `[4] decrypted 59 keys | model AC4220/12` — a digest mismatch throws
+instead. This script is dependency-free (it carries its own CoAP codec), so it
+runs before Task 2 exists.
 
 - [ ] **Step 6: Commit**
 
@@ -1244,7 +1263,7 @@ describe('DeviceInfoSchema', () => {
 describe('PluginConfigSchema', () => {
   it('accepts a minimal config and defaults the switch opt-ins to false', () => {
     const config = PluginConfigSchema.parse({
-      platform: 'PhilipsAir',
+      platform: 'PhilipsAirPurifier',
       devices: [{ host: '192.168.20.151' }],
     })
     expect(config.devices[0]!.host).toBe('192.168.20.151')
@@ -1253,11 +1272,11 @@ describe('PluginConfigSchema', () => {
   })
 
   it('rejects a device with no host', () => {
-    expect(() => PluginConfigSchema.parse({ platform: 'PhilipsAir', devices: [{}] })).toThrow()
+    expect(() => PluginConfigSchema.parse({ platform: 'PhilipsAirPurifier', devices: [{}] })).toThrow()
   })
 
   it('defaults devices to an empty list so an unconfigured plugin is inert', () => {
-    expect(PluginConfigSchema.parse({ platform: 'PhilipsAir' }).devices).toEqual([])
+    expect(PluginConfigSchema.parse({ platform: 'PhilipsAirPurifier' }).devices).toEqual([])
   })
 })
 ```
@@ -1861,7 +1880,7 @@ no third-party transport."
 - [ ] `resolveModel` prefers an exact match over the family prefix (asserted by identity on `AC0850/81`)
 - [ ] `resolveModel` on an unknown string returns a generic config for the given generation
 - [ ] `deviceKey('D03105#1')` returns `'D03105'`
-- [ ] All 61 models from the HA registry are present in `DEVICE_MODELS`
+- [ ] All 62 models from the HA registry are present in `DEVICE_MODELS`
 - [ ] AC4220's config lists 5 speeds and the auto/sleep presets ONLY — turbo (`D0310C=18`) and medium (`19`) are deliberately excluded as hardware-verified duplicates of speed 5 and speed 3
 - [ ] `keys.ts` documents the four hardware-verified quirks: `D03105` read-only, `D03130` is 0/100, `D03135` is the real light control, `D03137` is not writable
 
@@ -1880,7 +1899,7 @@ grep -n 'NEW2_\|^    [A-Z_]* = ' /tmp/ha-ref/custom_components/philips_airpurifi
 ```
 
 Source of truth: `const.py` class `PhilipsApi` (keys) and `device_models.py` dict
-`DEVICE_MODELS` (61 entries).
+`DEVICE_MODELS` (62 entries).
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1931,8 +1950,8 @@ describe('resolveModel', () => {
     expect(config.speeds).toEqual({})
   })
 
-  it('has all 61 models from the HA registry', () => {
-    expect(Object.keys(DEVICE_MODELS)).toHaveLength(61)
+  it('has all 62 models from the HA registry', () => {
+    expect(Object.keys(DEVICE_MODELS)).toHaveLength(62)
   })
 })
 ```
@@ -2112,7 +2131,7 @@ const CONFIG_AC4220 = config({
 })
 
 /**
- * All 61 models from DEVICE_MODELS in device_models.py.
+ * All 62 models from DEVICE_MODELS in device_models.py.
  *
  * Port every remaining entry using the same shape. Keys are the registry's model
  * strings (e.g. 'AC0850/11 AWS_Philips_AIR', 'AC2889', 'CX7550'). Only AC4220 is
@@ -2121,7 +2140,7 @@ const CONFIG_AC4220 = config({
 export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
   AC4220: CONFIG_AC4220,
   AC4221: CONFIG_AC4220,
-  // ... port the other 59 entries from device_models.py here
+  // ... port the other 60 entries from device_models.py here
 }
 
 /**
@@ -2160,7 +2179,7 @@ top to bottom. For each entry transcribe `api_generation`, `preset_modes`,
 (AC1214 only, out of scope). Confirm the count:
 
 ```bash
-npx vitest run test/models.test.ts -t 'all 61 models'
+npx vitest run test/models.test.ts -t 'all 62 models'
 ```
 
 - [ ] **Step 7: Run the full test file**
@@ -2177,7 +2196,7 @@ Expected: PASS, all tests.
 git add src/device/keys.ts src/device/models.ts test/models.test.ts
 git commit -m "Port device key and model capability tables
 
-61 models transcribed from the HA integration's DEVICE_MODELS registry.
+62 models transcribed from the HA integration's DEVICE_MODELS registry.
 Resolution is exact match, then 6-char family prefix, then a generic
 config — AC4220/12 resolves via the AC4220 prefix.
 
@@ -3290,7 +3309,7 @@ Three rules come from hardware probing, not the HA registry:
 - [ ] Generates a stable accessory UUID from the device id, falling back to the host
 - [ ] Restores cached accessories via `configureAccessory` instead of duplicating them
 - [ ] Unregisters cached accessories no longer present in config
-- [ ] A device that fails to connect at startup logs an error and is skipped — it never crashes Homebridge or takes down the platform
+- [ ] A device that fails to connect at startup logs an error, stays registered, and retries via the coordinator backoff until it appears (CoAP NON has no retransmission, so one lost datagram must not drop the device until restart); the accessory attaches on first status, and a cached accessory reports SERVICE_COMMUNICATION_FAILURE rather than serving stale values. It never crashes Homebridge or takes down the platform. [CORRECTED 2026-07-31 by user ruling — original criterion said "and is skipped", which shipped a real availability bug]
 - [ ] With no `devices` configured the platform logs once and creates nothing
 - [ ] An unknown model logs once at info and uses a generation-detected generic profile
 - [ ] `shutdown` tears down every coordinator
@@ -3498,7 +3517,7 @@ git commit -m "Wire up the dynamic platform
 Accessory UUIDs seed from the device id rather than the host, so a DHCP
 lease change does not orphan the accessory and duplicate it.
 
-A device that fails to connect logs an error and is skipped; it never
+A device that fails to connect logs an error and is retried with backoff; it never
 takes down the platform or crashes Homebridge."
 ```
 
@@ -3514,7 +3533,7 @@ takes down the platform or crashes Homebridge."
 - Create: `homebridge-ui/public/index.html`
 
 **Acceptance Criteria:**
-- [ ] `config.schema.json` sets `pluginAlias: "PhilipsAir"`, `pluginType: "platform"`, `singular: true`, `customUiPath: "./homebridge-ui"`
+- [ ] `config.schema.json` sets `pluginAlias: "PhilipsAirPurifier"`, `pluginType: "platform"`, `singular: true`, `customUiPath: "./homebridge-ui"`
 - [ ] The UI lists configured devices and supports remove
 - [ ] "Scan network" returns discovered devices with model, name, and firmware
 - [ ] Manual IP entry validates the address format, probes the host, and rejects one that is not a Philips device with a clear message
@@ -3534,7 +3553,7 @@ The schema stays minimal because the custom UI owns the real editing experience.
 
 ```json
 {
-  "pluginAlias": "PhilipsAir",
+  "pluginAlias": "PhilipsAirPurifier",
   "pluginType": "platform",
   "singular": true,
   "customUiPath": "./homebridge-ui",
@@ -3653,7 +3672,7 @@ new PhilipsAirUiServer()
   async function currentConfig() {
     const blocks = await homebridge.getPluginConfig()
     if (blocks.length === 0) {
-      blocks.push({ platform: 'PhilipsAir', name: 'Philips Air', devices: [] })
+      blocks.push({ platform: 'PhilipsAirPurifier', name: 'Philips Air', devices: [] })
       await homebridge.updatePluginConfig(blocks)
     }
     blocks[0].devices ||= []
@@ -3932,7 +3951,7 @@ Open `http://192.168.20.21:8581`, go to Accessories, and compare against the
 device's own panel and against a direct read:
 
 ```bash
-node scripts/spike.mjs 192.168.20.151 | grep -E 'full:|power|model'
+node scripts/coap-spike.mjs 192.168.20.151 | grep -E 'power:|prefilter:|decrypted'
 ```
 
 Check temperature (`D03224 ÷ 10`), humidity (`D03125`), PM2.5 (`D03221`),
@@ -4041,10 +4060,22 @@ behavioural. Commit fixes in small related batches rather than one large commit.
 - [ ] **Step 5: Re-check the protocol invariants explicitly**
 
 ```bash
-grep -n '>>> 0' src/airctrl/crypto.ts                       # must be present
-grep -n '& 0xFFFFFFFF' src/ || echo 'no signed AND — good'  # must find nothing
-grep -n 'beepWriteValue' src/homekit/mapping.ts             # on must be 100
-grep -n 'D03105' src/accessory.ts || echo 'light does not use the read-only key — good'
+grep -n '>>> 0' src/airctrl/crypto.ts                                  # must be present
+
+# Real (non-comment) code must never use the signed `&` mask.
+if grep -rn '& 0xFFFFFFFF' src --include='*.ts' | grep -vE ':\s*(//|\*)'; then
+  echo 'FAIL: signed AND (& 0xFFFFFFFF) found outside a comment'; exit 1
+fi
+echo 'no signed AND outside comments — good'
+
+grep -n 'beepWriteValue' src/homekit/mapping.ts                        # on must be 100
+
+# accessory.ts must never read/write the read-only D03105 key.
+if grep -rn 'D03105' src/accessory.ts | grep -vE ':\s*(//|\*)'; then
+  echo 'FAIL: accessory.ts uses the read-only D03105 key outside a comment'; exit 1
+fi
+echo 'light does not use the read-only key — good'
+
 npx vitest run test/mapping.test.ts test/crypto.test.ts
 ```
 

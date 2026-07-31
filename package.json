@@ -1,0 +1,60 @@
+{
+  "name": "homebridge-philips-air-purifier",
+  "displayName": "Philips Air Purifier",
+  "version": "0.1.0",
+  "description": "HomeKit support for Philips air purifiers over encrypted CoAP, with no Python dependency.",
+  "author": "Ruaan Deysel",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruaan-deysel/homebridge-philips-air-purifier.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ruaan-deysel/homebridge-philips-air-purifier/issues"
+  },
+  "homepage": "https://github.com/ruaan-deysel/homebridge-philips-air-purifier#readme",
+  "engines": {
+    "homebridge": "^2.0.0",
+    "node": "^22.12.0 || ^24.0.0"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "philips",
+    "air-purifier",
+    "airpurifier",
+    "coap"
+  ],
+  "files": [
+    "dist",
+    "config.schema.json",
+    "homebridge-ui",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "lint": "eslint . --max-warnings=0 && npm run typecheck",
+    "prepublishOnly": "npm run lint && npm run test && npm run build"
+  },
+  "dependencies": {
+    "@homebridge/plugin-ui-utils": "^2.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^24.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^17.8.0",
+    "homebridge": "^2.2.1",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

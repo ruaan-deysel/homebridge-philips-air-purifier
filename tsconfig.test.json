@@ -1,0 +1,12 @@
+// Typecheck-only config covering src AND test. tsconfig.json deliberately
+// excludes test/ so the build emits only shipped code; without this file the
+// test suite is never typechecked at all (vitest transpiles without checking).
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}
