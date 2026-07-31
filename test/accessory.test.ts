@@ -52,6 +52,7 @@ function setup(
 ): {
   accessory: Accessory
   coordinator: FakeCoordinator
+  log: Logging & { debug: ReturnType<typeof vi.fn> }
 } {
   const coordinator = new FakeCoordinator(status)
   const log = Object.assign(vi.fn(), {
@@ -62,7 +63,7 @@ function setup(
     log: vi.fn(),
     success: vi.fn(),
     prefix: '',
-  }) as unknown as Logging
+  }) as unknown as Logging & { debug: ReturnType<typeof vi.fn> }
   const platform = {
     api: { hap: { HapStatusError, HAPStatus } } as unknown as API,
     log,
@@ -77,7 +78,7 @@ function setup(
     model,
     config,
   )
-  return { accessory, coordinator }
+  return { accessory, coordinator, log }
 }
 
 describe('PhilipsAirAccessory', () => {
@@ -234,8 +235,23 @@ describe('PhilipsAirAccessory', () => {
 
     coordinator.publish({})
     expect(update).toHaveBeenCalledOnce()
-    expect(update).toHaveBeenCalledWith(0)
+    // The captured fixture is on (D03102=1) in Auto (D0310C=0) reporting fan
+    // speed 1 (D0310D=1) — RotationSpeed must reflect that running speed (20%),
+    // not 0. (Previously asserted 0 here, which was finding 1's bug: Active
+    // reads ACTIVE while RotationSpeed read 0 for the same running device.)
+    expect(update).toHaveBeenCalledWith(20)
     expect(speed.statusCode).toBe(HAPStatus.SUCCESS)
+  })
+
+  it('reports a nonzero RotationSpeed while Active for Auto mode on the real AC4220 fixture', async () => {
+    const { accessory } = setup()
+    const purifier = accessory.getService(Service.AirPurifier)!
+
+    await expect(purifier.getCharacteristic(Characteristic.Active).handleGetRequest())
+      .resolves.toBe(Characteristic.Active.ACTIVE)
+    const speed = await purifier.getCharacteristic(Characteristic.RotationSpeed).handleGetRequest()
+    expect(speed).toBeGreaterThan(0)
+    expect(speed).toBe(20)
   })
 
   it('removes disabled optional services restored from cache', () => {
@@ -306,8 +322,13 @@ describe('PhilipsAirAccessory', () => {
       .resolves.toBe(75)
   })
 
-  it('maps Gen1 child lock booleans and beep strings from model capabilities', async () => {
-    const { accessory, coordinator } = setup(deviceConfig, {
+  it('maps Gen1 child lock booleans and drops the colliding Beep switch (AC2729)', async () => {
+    // AC2729 lists Gen1Key.BEEP and Gen1Key.DISPLAY_BACKLIGHT as the same device
+    // key ('uil') — see keys.ts. Only one service may bind to it: the Lamp wins,
+    // the Beep switch is skipped. (Previously this test set up exactly this
+    // collision and only asserted the Beep half worked, which encoded the bug:
+    // toggling "Beep" silently flipped the "Lamp" bulb too, and vice versa.)
+    const { accessory, coordinator, log } = setup(deviceConfig, {
       [Gen1Key.POWER]: '1',
       [Gen1Key.MODE]: 'P',
       [Gen1Key.SPEED]: '1',
@@ -325,13 +346,13 @@ describe('PhilipsAirAccessory', () => {
     await childLock.handleSetRequest(Characteristic.LockPhysicalControls.CONTROL_LOCK_ENABLED)
     expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen1Key.CHILD_LOCK]: true })
 
-    const beep = accessory.getServiceById(Service.Switch, 'beep')!
-      .getCharacteristic(Characteristic.On)
-    await expect(beep.handleGetRequest()).resolves.toBe(true)
-    await beep.handleSetRequest(false)
-    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen1Key.BEEP]: '0' })
-    await beep.handleSetRequest(true)
-    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen1Key.BEEP]: '1' })
+    expect(accessory.getServiceById(Service.Switch, 'beep')).toBeUndefined()
+    expect(log.debug).toHaveBeenCalledWith(expect.stringContaining('uil'))
+
+    const light = accessory.getServiceById(Service.Lightbulb, 'lamp')!
+    await expect(light.getCharacteristic(Characteristic.On).handleGetRequest()).resolves.toBe(true)
+    await light.getCharacteristic(Characteristic.On).handleSetRequest(false)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen1Key.DISPLAY_BACKLIGHT]: '0' })
   })
 
   it('maps Gen2 power, Auto target, and ordered ladder state', async () => {
@@ -388,7 +409,13 @@ describe('PhilipsAirAccessory', () => {
     expect(coordinator.setControl).not.toHaveBeenCalled()
   })
 
-  it('maps non-ladder Gen3 mode values by ordered model speed writes', async () => {
+  it('maps non-ladder Gen3 mode values by ordered model speed writes, and exposes no dead D03105 light', async () => {
+    // D03105 (Gen3Key.DISPLAY_BACKLIGHT) is a hardware-verified read-only status
+    // mirror (see keys.ts, hardware fact 1). AC0950's registry lists it as the
+    // light entity but has no known LAMP_MODE alternative to route through, so
+    // no writable Lightbulb is exposed. (Previously this test only asserted the
+    // Lightbulb service existed, which encoded the bug: toggling it wrote the
+    // undocumented magic value 123 to a key the device ACKs and ignores.)
     const { accessory } = setup(deviceConfig, {
       [Gen3Key.POWER]: 1,
       [Gen3Key.MODE_B]: 19,
@@ -401,8 +428,22 @@ describe('PhilipsAirAccessory', () => {
     await expect(accessory.getService(Service.AirPurifier)!
       .getCharacteristic(Characteristic.RotationSpeed).handleGetRequest())
       .resolves.toBeCloseTo(200 / 3)
-    expect(accessory.getServiceById(Service.Lightbulb, 'lamp')).toBeDefined()
+    expect(accessory.getServiceById(Service.Lightbulb, 'lamp')).toBeUndefined()
     expect(accessory.getServiceById(Service.FilterMaintenance, 'pre-filter')).toBeUndefined()
+  })
+
+  it('routes the AC2221 Lamp through LAMP_MODE (D03135), not the read-only D03105 mirror', async () => {
+    const { accessory, coordinator } = setup(deviceConfig, {
+      [Gen3Key.POWER]: 1,
+      [Gen3Key.MODE_B]: 0,
+      [Gen3Key.PM25]: 8,
+      [Gen3Key.LAMP_MODE]: 0,
+    }, resolveModel('AC2221'))
+
+    const light = accessory.getServiceById(Service.Lightbulb, 'lamp')!
+    await expect(light.getCharacteristic(Characteristic.On).handleGetRequest()).resolves.toBe(false)
+    await light.getCharacteristic(Characteristic.On).handleSetRequest(true)
+    expect(coordinator.setControl).toHaveBeenLastCalledWith({ [Gen3Key.LAMP_MODE]: 1 })
   })
 
   it('rejects nonzero RotationSpeed when the model has no speed ladder', async () => {

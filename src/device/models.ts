@@ -291,6 +291,13 @@ const CONFIG_AC0850_GEN3 = config({
   unavailableFilters: [Gen1Key.FILTER_NANOPROTECT_PREFILTER],
 })
 
+// The upstream registry lists D03105#1 as the light entity, and unlike AC2221 /
+// AC3210 / AC3420 / the HUxxxx models, this registry data has no NEW2_LAMP_MODE
+// select to promote instead — so there is no documented on-value for this
+// model's light control. `lights` is left as-is for provenance, but
+// accessory.ts's lightValues() treats any D03105 key as read-only (hardware
+// fact 1) and never returns a control for it, so no writable Lightbulb is
+// exposed for AC0950 until a real light key is confirmed.
 const CONFIG_AC0950 = config({
   apiGeneration: ApiGeneration.Gen3,
   presetModes: AC0950_PRESETS,
@@ -348,25 +355,32 @@ const CONFIG_AC4220 = config({
 
 // AC2210/AC2221 (PureProtect Quiet 2200 series). Not hardware-verified: presets
 // are transcribed literally from the HA registry (includes turbo/medium).
+//
+// The upstream registry lists D03105#1 as the light entity, but per hardware fact
+// 1 (see keys.ts) D03105 is a read-only status mirror on this API generation.
+// This model's registry data already lists NEW2_LAMP_MODE (D03135) as a select —
+// promoted here to `lights` instead, the same correction applied to AC4220.
 const CONFIG_AC2221 = config({
   apiGeneration: ApiGeneration.Gen3,
   presetModes: AC32XX_PRESETS_FULL,
   speeds: AC32XX_SPEEDS,
-  lights: [`${Gen3Key.DISPLAY_BACKLIGHT}#1`],
+  lights: [Gen3Key.LAMP_MODE],
   switches: [Gen3Key.CHILD_LOCK, Gen3Key.BEEP, Gen3Key.AUTO_PLUS_AI],
-  selects: [`${Gen3Key.PREFERRED_INDEX}#1`, `${Gen3Key.LAMP_MODE}#1`, Gen3Key.AMBIENT_LIGHT_MODE],
+  selects: [`${Gen3Key.PREFERRED_INDEX}#1`, Gen3Key.AMBIENT_LIGHT_MODE],
 })
 
 // AC3210/AC3220/AC3221. Not hardware-verified: presets are transcribed
 // literally from the HA registry (includes turbo/medium).
+//
+// Same D03105/LAMP_MODE correction as CONFIG_AC2221 above — see that comment.
 const CONFIG_AC3210 = config({
   apiGeneration: ApiGeneration.Gen3,
   presetModes: AC32XX_PRESETS_FULL,
   speeds: AC32XX_SPEEDS,
-  lights: [`${Gen3Key.DISPLAY_BACKLIGHT}#1`],
+  lights: [Gen3Key.LAMP_MODE],
   switches: [Gen3Key.CHILD_LOCK, Gen3Key.BEEP, Gen3Key.AUTO_PLUS_AI],
   // Source literally uses the gen2 preferred-index key here (NEW_PREFERRED_INDEX).
-  selects: [Gen2Key.PREFERRED_INDEX, `${Gen3Key.LAMP_MODE}#1`, Gen3Key.AMBIENT_LIGHT_MODE],
+  selects: [Gen2Key.PREFERRED_INDEX, Gen3Key.AMBIENT_LIGHT_MODE],
 })
 
 const CONFIG_AC385X50 = config({
@@ -403,14 +417,15 @@ const CONFIG_AC5659 = config({
   selects: [Gen1Key.PREFERRED_INDEX],
 })
 
+// Same D03105/LAMP_MODE correction as CONFIG_AC2221 above.
 const CONFIG_HU1509 = config({
   apiGeneration: ApiGeneration.Gen3,
   presetModes: HU1509_PRESETS,
   speeds: HU1509_SPEEDS,
   createFan: false,
   switches: [Gen3Key.BEEP, Gen3Key.STANDBY_SENSORS],
-  lights: [`${Gen3Key.DISPLAY_BACKLIGHT}#2`],
-  selects: [`${Gen3Key.TIMER}#2`, `${Gen3Key.LAMP_MODE}#2`, Gen3Key.AMBIENT_LIGHT_MODE],
+  lights: [Gen3Key.LAMP_MODE],
+  selects: [`${Gen3Key.TIMER}#2`, Gen3Key.AMBIENT_LIGHT_MODE],
 })
 
 // Identical to HU1509 but without the ambient-light-mode select.
@@ -420,17 +435,18 @@ const CONFIG_HU4209 = config({
   speeds: HU1509_SPEEDS,
   createFan: false,
   switches: [Gen3Key.BEEP, Gen3Key.STANDBY_SENSORS],
-  lights: [`${Gen3Key.DISPLAY_BACKLIGHT}#2`],
-  selects: [`${Gen3Key.TIMER}#2`, `${Gen3Key.LAMP_MODE}#2`],
+  lights: [Gen3Key.LAMP_MODE],
+  selects: [`${Gen3Key.TIMER}#2`],
 })
 
+// Same D03105/LAMP_MODE correction as CONFIG_AC2221 above.
 const CONFIG_AC3420 = config({
   apiGeneration: ApiGeneration.Gen3,
   presetModes: AC0950_PRESETS,
   speeds: AC0950_SPEEDS,
   switches: [Gen3Key.CHILD_LOCK, Gen3Key.BEEP],
-  lights: [`${Gen3Key.DISPLAY_BACKLIGHT}#1`],
-  selects: [`${Gen3Key.LAMP_MODE}#1`],
+  lights: [Gen3Key.LAMP_MODE],
+  selects: [],
   unavailableFilters: [Gen1Key.FILTER_NANOPROTECT_PREFILTER],
 })
 
@@ -844,6 +860,7 @@ export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
   'HU4209/00': CONFIG_HU4209,
 
   // --- HU5710 ---
+  // Same D03105/LAMP_MODE correction as CONFIG_AC2221 above.
   HU5710: config({
     apiGeneration: ApiGeneration.Gen3,
     presetModes: HU1509_PRESETS,
@@ -856,8 +873,8 @@ export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
       Gen3Key.AUTO_QUICKDRY_MODE,
       Gen3Key.STANDBY_SENSORS,
     ],
-    lights: [`${Gen3Key.DISPLAY_BACKLIGHT}#2`],
-    selects: [`${Gen3Key.TIMER}#2`, `${Gen3Key.LAMP_MODE}#2`, Gen3Key.AMBIENT_LIGHT_MODE],
+    lights: [Gen3Key.LAMP_MODE],
+    selects: [`${Gen3Key.TIMER}#2`, Gen3Key.AMBIENT_LIGHT_MODE],
   }),
 }
 

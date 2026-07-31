@@ -222,14 +222,24 @@ export class PhilipsAirAccessory {
 
     const cachedBeep = accessory.getServiceById(S.Switch, 'beep')
     const beepKey = this.beepKey
-    if (config.exposeBeepSwitch && status && beepKey && beepKey in status) {
+    // Some models (e.g. AC2729) reuse the same device key for Gen1Key.BEEP and
+    // Gen1Key.DISPLAY_BACKLIGHT ('uil'). Binding both a Beep switch and a Lamp
+    // bulb to that key makes them fight — toggling one silently flips the other.
+    // The light wins; the beep switch is skipped when they collide.
+    const beepCollidesWithLight = beepKey !== undefined
+      && this.light !== undefined
+      && this.lightControl?.key === beepKey
+    if (config.exposeBeepSwitch && status && beepKey && beepKey in status && !beepCollidesWithLight) {
       this.beep = cachedBeep ?? accessory.addService(S.Switch, 'Beep', 'beep')
       this.purifier.addLinkedService(this.beep)
       const on = this.beep.getCharacteristic(C.On)
       this.onGet(on, device => this.beepFromValue(device[beepKey]))
       on.onSet(value => this.write({ [beepKey]: this.beepValue(Boolean(value)) }))
-    } else if (cachedBeep) {
-      accessory.removeService(cachedBeep)
+    } else {
+      if (cachedBeep) accessory.removeService(cachedBeep)
+      if (beepCollidesWithLight) platform.log.debug(
+        `Skipping Beep switch: key ${beepKey} is already bound to the Lamp light control`,
+      )
     }
 
     coordinator.on('status', (next: DeviceStatus) => {
@@ -346,8 +356,10 @@ export class PhilipsAirAccessory {
       || key === Gen2Key.DISPLAY_BACKLIGHT
       || key === Gen3Key.DISPLAY_BACKLIGHT_PRIMARY
     ) return { key, on: 100, off: 0 }
-    if (registryKey.startsWith(`${Gen3Key.DISPLAY_BACKLIGHT}#`)) return { key, on: 123, off: 0 }
-    if (key === Gen3Key.DISPLAY_BACKLIGHT) return { key, on: 100, off: 0 }
+    // Gen3Key.DISPLAY_BACKLIGHT (D03105, any #N variant) is a hardware-verified
+    // READ-ONLY status mirror: writes are ACKed and silently discarded. There is
+    // no documented on-value for it, so no writable Lightbulb is exposed for a
+    // model that only lists this key — see Gen3Key.LAMP_MODE for the real control.
     if (key === Gen3Key.LAMP_MODE) return { key, on: 1, off: 0 }
     return undefined
   }
@@ -370,7 +382,26 @@ export class PhilipsAirAccessory {
   private speedMode(status: DeviceStatus): number | null {
     const index = Object.values(this.model.speeds)
       .findIndex(control => this.matchesControl(status, control))
-    return index === -1 ? null : index + 1
+    if (index !== -1) return index + 1
+    return this.fanSpeedMode(status)
+  }
+
+  /**
+   * Fallback for modes with no matching speed control (Auto, Sleep, or any preset
+   * off the ladder) — derive a RotationSpeed position from the reported fan speed
+   * (Gen3Key.FAN_SPEED / D0310D) instead of reporting 0 for a running device.
+   * Clamped into [1, speedCount]: an out-of-range code (e.g. Turbo reporting 18 on
+   * the hardware-verified AC4220, or a model's special top-speed code) lands on the
+   * top rung, which matches — those codes represent the fastest reported state.
+   */
+  private fanSpeedMode(status: DeviceStatus): number | null {
+    if (this.model.apiGeneration !== ApiGeneration.Gen3) return null
+    if (this.unavailable(this.model.unavailableSensors, Gen3Key.FAN_SPEED)) return null
+    const speedCount = Object.keys(this.model.speeds).length
+    if (speedCount < 1) return null
+    const reported = status[Gen3Key.FAN_SPEED]
+    if (typeof reported !== 'number' || !Number.isFinite(reported) || reported < 1) return null
+    return Math.min(speedCount, Math.round(reported))
   }
 
   private number(value: unknown): number {
