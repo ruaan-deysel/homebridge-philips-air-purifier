@@ -73,6 +73,10 @@ export class DeviceCoordinator extends EventEmitter {
    * Emit without letting a consumer's exception escape into transport state. The HomeKit
    * layer throws HapStatusError, and a throw out of {@link ingest} would mark the device
    * unavailable or abort a successful reconnect. Listeners are isolated from each other.
+   *
+   * Invariant: listeners MUST be synchronous. Only a synchronous throw is caught here — an
+   * async listener returns a promise this ignores, so its rejection escapes as an unhandled
+   * rejection. Every in-tree listener (accessory.ts, platform.ts) is synchronous.
    */
   private safeEmit(event: 'status' | 'availability', payload: DeviceStatus | boolean): void {
     for (const listener of this.rawListeners(event)) {

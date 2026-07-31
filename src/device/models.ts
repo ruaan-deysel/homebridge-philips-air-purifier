@@ -634,6 +634,8 @@ export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
   AC3421: CONFIG_AC3420,
 
   // --- AC3737 ---
+  // `lights` is upstream registry data kept for provenance only: D03105 is a read-only
+  // status mirror, so lightValues() returns no control and no Lightbulb is exposed.
   AC3737: config({
     apiGeneration: ApiGeneration.Gen3,
     presetModes: {
@@ -781,6 +783,8 @@ export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
   }),
 
   // --- CX5120 ---
+  // `lights` is upstream registry data kept for provenance only: D03105 is a read-only
+  // status mirror, so lightValues() returns no control and no Lightbulb is exposed.
   CX5120: config({
     apiGeneration: ApiGeneration.Gen3,
     presetModes: {
@@ -823,6 +827,8 @@ export const DEVICE_MODELS: Record<string, DeviceModelConfig> = {
   // Fan-only Gen3 device (oscillating tower fan). MODE_A (D0310A) is always 1;
   // everything is driven through MODE_B (D0310C). The top manual speed (12)
   // reports the special code 82, not 12 — there is no separate turbo preset.
+  // `lights` is upstream registry data kept for provenance only: D03105 is a read-only
+  // status mirror, so lightValues() returns no control and no Lightbulb is exposed.
   CX7550: config({
     apiGeneration: ApiGeneration.Gen3,
     presetModes: {
