@@ -13,6 +13,18 @@ export class DigestMismatchError extends Error {
   }
 }
 
+/** Thrown when a wire blob's shape is invalid before any crypto is attempted. */
+export class MalformedPayloadError extends Error {
+  constructor(reason: string) {
+    super(`malformed encrypted payload: ${reason}`)
+    this.name = 'MalformedPayloadError'
+  }
+}
+
+const CLIENT_KEY_LEN = 8
+const DIGEST_LEN = 64
+const EVEN_HEX = /^(?:[0-9A-Fa-f]{2})*$/
+
 /**
  * The device derives both key and IV from one MD5 hash, then uses the ASCII
  * bytes of the hex digits (not the raw hash bytes) as AES material.
@@ -52,9 +64,15 @@ export function encrypt(clientKey: string, payload: string): string {
 
 /** Verify the digest and decrypt. The key travels in the payload's first 8 chars. */
 export function decrypt(blob: string): string {
-  const clientKey = blob.slice(0, 8)
-  const ciphertext = blob.slice(8, -64)
-  const digest = blob.slice(-64)
+  if (blob.length < CLIENT_KEY_LEN + DIGEST_LEN) {
+    throw new MalformedPayloadError('blob shorter than clientKey + digest')
+  }
+  const clientKey = blob.slice(0, CLIENT_KEY_LEN)
+  const ciphertext = blob.slice(CLIENT_KEY_LEN, -DIGEST_LEN)
+  const digest = blob.slice(-DIGEST_LEN)
+  if (!EVEN_HEX.test(ciphertext)) {
+    throw new MalformedPayloadError('ciphertext is not valid even-length hex')
+  }
   const computed = createHash('sha256').update(clientKey + ciphertext).digest('hex').toUpperCase()
   if (digest !== computed) throw new DigestMismatchError(digest, computed)
 

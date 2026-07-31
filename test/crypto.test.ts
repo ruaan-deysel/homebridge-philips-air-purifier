@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { DigestMismatchError, decrypt, deriveKeyAndIv, encrypt, nextKey } from '../src/airctrl/crypto.js'
+import { DigestMismatchError, MalformedPayloadError, decrypt, deriveKeyAndIv, encrypt, nextKey } from '../src/airctrl/crypto.js'
 
 describe('nextKey', () => {
   // Python: (int(k, 16) + 1) & 0xFFFFFFFF, formatted as 4 big-endian bytes.
@@ -45,25 +45,24 @@ describe('encrypt / decrypt', () => {
   })
 
   it('fails cleanly, not with a raw OpenSSL error, on a short/truncated blob', () => {
-    // Shorter than clientKey(8) + digest(64): slicing produces a garbage
-    // ciphertext/digest pair, which must still fail as a digest mismatch
-    // rather than throwing further down inside decipher.
-    expect(() => decrypt('0DC377BA')).toThrow(DigestMismatchError)
-    expect(() => decrypt('')).toThrow(DigestMismatchError)
+    // Shorter than clientKey(8) + digest(64): rejected by the shape check
+    // before any digest or cipher work happens.
+    expect(() => decrypt('0DC377BA')).toThrow(MalformedPayloadError)
+    expect(() => decrypt('')).toThrow(MalformedPayloadError)
   })
 
-  it('throws (does not hang or return garbage) on an odd-length hex ciphertext', () => {
+  it('throws a typed MalformedPayloadError (not a raw OpenSSL error) on an odd-length hex ciphertext', () => {
     // Digest-valid but wire-corrupted: drop one hex nibble from the ciphertext,
     // then recompute the digest so decrypt() gets past the digest check and
-    // reaches Buffer.from(ciphertext, 'hex') / decipher with a corrupt,
-    // odd-length string — the realistic wire-corruption path, distinct from
-    // tampering. Currently this surfaces as OpenSSL's own "wrong final block
-    // length" error rather than a DigestMismatchError; still a synchronous
-    // throw, not a silent failure, but not yet as clean as the other cases.
+    // would otherwise reach Buffer.from(ciphertext, 'hex') / decipher with a
+    // corrupt, odd-length string — the realistic wire-corruption path, distinct
+    // from tampering. The shape check now catches this before the cipher runs,
+    // so it throws a clean MalformedPayloadError instead of OpenSSL's own
+    // "wrong final block length" error.
     const blob = encrypt('0DC377BA', '{"test":1}')
     const clientKey = blob.slice(0, 8)
     const ciphertext = blob.slice(8, -64).slice(0, -1)
     const digest = createHash('sha256').update(clientKey + ciphertext).digest('hex').toUpperCase()
-    expect(() => decrypt(clientKey + ciphertext + digest)).toThrow()
+    expect(() => decrypt(clientKey + ciphertext + digest)).toThrow(MalformedPayloadError)
   })
 })

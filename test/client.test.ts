@@ -206,7 +206,11 @@ describe('PhilipsCoapClient', () => {
     }
   })
 
-  it('returns false when a required resync fails and sends no later control write', async () => {
+  it('continues remaining retries after a resync fails, still bounded by the deadline', async () => {
+    // Regression for CodeRabbit F6: a failed resync used to bail out of the
+    // whole retry loop via `catch { this.requireOpen(); return false }`. It
+    // must now fall through to the next attempt instead, so a single flaky
+    // resync doesn't sacrifice every remaining retry.
     const { device, client } = await start(request => {
       if (pathOf(request) === '/sys/dev/sync') return { payload: '0DC377BA' }
       if (pathOf(request) === '/sys/dev/control') return { payload: JSON.stringify({ status: 'failed' }) }
@@ -215,8 +219,12 @@ describe('PhilipsCoapClient', () => {
     const connect = vi.spyOn(client, 'connect').mockRejectedValueOnce(new Error('sync failed'))
 
     await expect(client.setControl({ D03102: 1 }, { retries: 2, retryDelayMs: 1 })).resolves.toBe(false)
-    expect(device.requests.filter(request => pathOf(request) === '/sys/dev/control')).toHaveLength(1)
-    expect(connect).toHaveBeenCalledOnce()
+    // All 3 attempts (initial + 2 retries) still send a control write, even
+    // though the very first resync failed.
+    expect(device.requests.filter(request => pathOf(request) === '/sys/dev/control')).toHaveLength(3)
+    // The failed resync is followed by further resync attempts (the next
+    // attempt's own resync), not just the one mocked failure.
+    expect(connect.mock.calls.length).toBeGreaterThan(1)
   })
 
   it('increments the rolling key before every control attempt', async () => {
