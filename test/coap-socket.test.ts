@@ -249,7 +249,10 @@ describe('CoapSocket.observe', () => {
       const error = new Error(`${mode} send failure`)
       if (mode === 'synchronous') throw error
       const callback = args.at(-1)
-      if (typeof callback === 'function') sendCallback = callback
+      // typeof narrows to the built-in `Function` type, not our specific
+      // signature — cast at this use site since we know it's the send error
+      // callback CoAP libraries pass as the last argument.
+      if (typeof callback === 'function') sendCallback = callback as (error: Error) => void
     }
 
     observation.cancel()

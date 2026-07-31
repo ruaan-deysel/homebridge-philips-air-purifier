@@ -65,7 +65,7 @@ function setup(
     prefix: '',
   }) as unknown as Logging & { debug: ReturnType<typeof vi.fn> }
   const platform = {
-    api: { hap: { HapStatusError, HAPStatus } } as unknown as API,
+    api: { hap: { HapStatusError, HAPStatus: { SUCCESS: HAPStatus.SUCCESS, SERVICE_COMMUNICATION_FAILURE: HAPStatus.SERVICE_COMMUNICATION_FAILURE } } } as unknown as API,
     log,
     Service,
     Characteristic,
@@ -262,7 +262,7 @@ describe('PhilipsAirAccessory', () => {
     accessory.addService(Service.Switch, 'Beep', 'beep')
     const coordinator = new FakeCoordinator()
     const platform = {
-      api: { hap: { HapStatusError, HAPStatus } } as unknown as API,
+      api: { hap: { HapStatusError, HAPStatus: { SUCCESS: HAPStatus.SUCCESS, SERVICE_COMMUNICATION_FAILURE: HAPStatus.SERVICE_COMMUNICATION_FAILURE } } } as unknown as API,
       log: vi.fn() as unknown as Logging,
       Service,
       Characteristic,

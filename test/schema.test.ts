@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import fixture from './fixtures/ac4220-12-status.json'
+import fixture from './fixtures/ac4220-12-status.json' with { type: 'json' }
 import { DeviceInfoSchema, PluginConfigSchema, parseStatusPayload } from '../src/airctrl/schema.js'
 
 describe('parseStatusPayload', () => {

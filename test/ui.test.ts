@@ -119,7 +119,7 @@ describe('config-ops (browser config logic)', () => {
     const blocks = ensureConfig([])
     const added = addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12', name: 'Office' })
     expect(added).toBe(true)
-    expect(blocks[0].devices).toEqual([{
+    expect(blocks[0]!.devices).toEqual([{
       host: '192.168.1.20',
       name: 'Office',
       model: 'AC4220/12',
@@ -135,7 +135,7 @@ describe('config-ops (browser config logic)', () => {
     addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12' })
     const added = addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12', name: 'Duplicate' })
     expect(added).toBe(false)
-    expect(blocks[0].devices).toHaveLength(1)
+    expect(blocks[0]!.devices).toHaveLength(1)
   })
 
   it('removeDeviceFromConfig removes a configured device and reports success', () => {
@@ -143,7 +143,7 @@ describe('config-ops (browser config logic)', () => {
     addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12' })
     const removed = removeDeviceFromConfig(blocks, '192.168.1.20')
     expect(removed).toBe(true)
-    expect(blocks[0].devices).toHaveLength(0)
+    expect(blocks[0]!.devices).toHaveLength(0)
   })
 
   it('removeDeviceFromConfig reports failure for an unknown host', () => {
@@ -155,7 +155,7 @@ describe('config-ops (browser config logic)', () => {
     const blocks = ensureConfig([])
     addDeviceToConfig(blocks, { host: '192.168.1.20', model: 'AC4220/12' })
     setDeviceToggle(blocks, '192.168.1.20', 'exposeSleepSwitch', true)
-    expect(blocks[0].devices[0].exposeSleepSwitch).toBe(true)
+    expect(blocks[0]!.devices[0]!.exposeSleepSwitch).toBe(true)
   })
 
   it('setDeviceToggle throws for a host that is no longer configured', () => {

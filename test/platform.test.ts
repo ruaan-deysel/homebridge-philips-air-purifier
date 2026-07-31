@@ -78,7 +78,16 @@ function api(): API & {
   const updated: PlatformAccessory[] = []
   const unregistered: PlatformAccessory[] = []
   const value = {
-    hap: { Characteristic, HapStatusError, HAPStatus, Service, uuid },
+    // Ambient const enums have no runtime object to import — build the
+    // subset of HAPStatus the code under test actually reads via already
+    // allowed property access on the enum's own members (TS2475).
+    hap: {
+      Characteristic,
+      HapStatusError,
+      HAPStatus: { SUCCESS: HAPStatus.SUCCESS, SERVICE_COMMUNICATION_FAILURE: HAPStatus.SERVICE_COMMUNICATION_FAILURE },
+      Service,
+      uuid,
+    },
     platformAccessory: TestPlatformAccessory,
     on: vi.fn((event: string, listener: () => void) => {
       events.set(event, listener)
@@ -117,7 +126,7 @@ function config(hosts: string[]): PlatformConfig {
   }
 }
 
-function gen3Status(model = 'AC4220/12', deviceIdKey = Gen1Key.DEVICE_ID): DeviceStatus {
+function gen3Status(model = 'AC4220/12', deviceIdKey: string = Gen1Key.DEVICE_ID): DeviceStatus {
   return {
     [deviceIdKey]: 'stable-device-id',
     [Gen3Key.NAME]: 'Living Room',
