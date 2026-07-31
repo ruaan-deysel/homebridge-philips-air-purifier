@@ -1,5 +1,7 @@
 import { createSocket, type Socket } from 'node:dgram'
 import { randomBytes, randomInt } from 'node:crypto'
+import { isIP } from 'node:net'
+import { debuglog } from 'node:util'
 import {
   CoapCode,
   CoapOption,
@@ -12,6 +14,9 @@ import {
 } from './message.js'
 
 const DEFAULT_TIMEOUT_MS = 8000
+
+// Enable with NODE_DEBUG=philips-air:coap-socket.
+const debug = debuglog('philips-air:coap-socket')
 
 export interface RequestOptions {
   method: 'GET' | 'POST'
@@ -58,9 +63,16 @@ export class CoapSocket {
     this.socket = createSocket('udp4')
     // Unconnected socket: without this check, any host on the network could spoof
     // a reply by guessing the 4-byte token. Only accept datagrams from the device
-    // we're actually talking to.
+    // we're actually talking to. When `host` is a hostname rather than a literal IP
+    // (e.g. a user hand-edited config.json with "purifier.local"), dgram resolves it
+    // to whatever address answers DNS at send time and rinfo.address may not match
+    // the literal `host` string, so only the port is checked in that case.
+    const hostIsLiteralIp = isIP(this.host) !== 0
     this.socket.on('message', (buffer, rinfo) => {
-      if (rinfo.address !== this.host || rinfo.port !== this.port) return
+      if (rinfo.port !== this.port || (hostIsLiteralIp && rinfo.address !== this.host)) {
+        debug('dropped datagram from %s:%d (expected %s:%d)', rinfo.address, rinfo.port, this.host, this.port)
+        return
+      }
       this.dispatch(buffer)
     })
     // A socket-level error must not become an unhandled exception. In-flight

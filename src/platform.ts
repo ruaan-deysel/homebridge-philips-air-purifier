@@ -134,9 +134,6 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
     }
     const status = coordinator.status
     if (!status) return
-    // Undo markOffline() for every characteristic it touched, not just the ones
-    // PhilipsAirAccessory happens to re-register below.
-    this.clearOffline(device.host)
     try {
       const deviceId = firstString(status, [Gen1Key.DEVICE_ID, Gen3Key.SERIAL, 'device_id'])
       const modelId = firstString(status, [Gen3Key.MODEL_ID, Gen2Key.MODEL_ID, Gen1Key.MODEL_ID]) ?? ''
@@ -164,6 +161,11 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
       const accessory = existing ?? new this.api.platformAccessory(displayName, accessoryUuid)
       accessory.displayName = displayName
       accessory.context.device = device
+      // Undo markOffline() for every characteristic it touched, not just the ones
+      // PhilipsAirAccessory happens to re-register below. Deferred until after the
+      // claim check so a duplicate-id device never un-poisons a cached accessory it's
+      // about to abandon.
+      this.clearOffline(device.host)
       new PhilipsAirAccessory(this, accessory, coordinator, model, device)
 
       if (existing) {
@@ -176,6 +178,7 @@ export class PhilipsAirPlatform implements DynamicPlatformPlugin {
       this.dropStaleClaims(device.host, accessoryUuid)
     } catch (error) {
       this.log.error(`Failed to set up device at ${device.host}: ${String(error)}`)
+      this.markOffline(device)
       this.discard(coordinator)
     }
   }

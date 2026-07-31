@@ -409,6 +409,90 @@ describe('PhilipsAirPlatform', () => {
     expect(mockApi.registered).toHaveLength(1)
   })
 
+  it('keeps a cached accessory poisoned when it wins a retry but loses the duplicate-id claim', async () => {
+    vi.useFakeTimers()
+    try {
+      const mockApi = api()
+      const platformLog = log()
+      const platform = new PhilipsAirPlatform(platformLog, config(['192.0.2.1', '192.0.2.2']), mockApi)
+      const configured = cached('Second', 'second-placeholder', '192.0.2.2')
+      const service = configured.addService(Service.AirPurifier, 'Second')
+      service.getCharacteristic(Characteristic.Active).updateValue(Characteristic.Active.ACTIVE)
+      platform.configureAccessory(configured)
+
+      // Host 1 connects cleanly first and claims the shared device id.
+      fakeDevices.set('192.0.2.1', { status: gen3Status() })
+      // Host 2 fails its first connect, poisoning its cached accessory...
+      fakeDevices.set('192.0.2.2', { error: new Error('offline') })
+
+      mockApi.events.get('didFinishLaunching')!()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(mockApi.registered).toHaveLength(1)
+      const active = service.getCharacteristic(Characteristic.Active)
+      expect(active.statusCode).toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+
+      // ...then host 2 connects successfully but reports the same device id as host 1.
+      fakeDevices.set('192.0.2.2', { status: gen3Status() })
+      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      // The duplicate is discarded, not registered, and the cached accessory must still
+      // read "No Response" instead of serving its restored (now stale) pre-offline values.
+      expect(mockApi.registered).toHaveLength(1)
+      expect(vi.mocked(platformLog.warn).mock.calls.map(([m]) => String(m))
+        .some(m => m.includes('192.0.2.2') && m.includes('192.0.2.1'))).toBe(true)
+      expect(active.statusCode).toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+      await expect(active.handleGetRequest()).rejects.toBeDefined()
+      await expect(active.handleSetRequest(Characteristic.Active.INACTIVE)).rejects.toBeDefined()
+
+      mockApi.events.get('shutdown')!()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-poisons a cached accessory when setting it up throws after clearOffline', async () => {
+    vi.useFakeTimers()
+    try {
+      const mockApi = api()
+      const platformLog = log()
+      const platform = new PhilipsAirPlatform(platformLog, config(['192.0.2.1']), mockApi)
+      const configured = cached('Broken', 'stable-device-id', '192.0.2.1')
+      const service = configured.addService(Service.AirPurifier, 'Broken')
+      service.getCharacteristic(Characteristic.Active).updateValue(Characteristic.Active.ACTIVE)
+      platform.configureAccessory(configured)
+
+      // Poison it via a first-contact failure...
+      fakeDevices.set('192.0.2.1', { error: new Error('offline') })
+      mockApi.events.get('didFinishLaunching')!()
+      await vi.advanceTimersByTimeAsync(0)
+      const active = service.getCharacteristic(Characteristic.Active)
+      expect(active.statusCode).toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+
+      // ...then let it connect, but make the rest of setup blow up (e.g. a HAP-side
+      // failure registering the restored accessory) after clearOffline already ran.
+      vi.mocked(mockApi.updatePlatformAccessories).mockImplementationOnce(() => {
+        throw new Error('boom')
+      })
+      fakeDevices.set('192.0.2.1', { status: gen3Status() })
+      await vi.advanceTimersByTimeAsync(5_000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(mockApi.registered).toEqual([])
+      expect(vi.mocked(platformLog.error).mock.calls.map(([m]) => String(m))
+        .some(m => m.includes('Failed to set up device'))).toBe(true)
+      // Setup blew up after clearOffline ran: the accessory must be re-poisoned, not left
+      // frozen on its restored (stale) pre-offline values with no handlers at all.
+      expect(active.statusCode).toBe(HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+      await expect(active.handleGetRequest()).rejects.toBeDefined()
+      await expect(active.handleSetRequest(Characteristic.Active.INACTIVE)).rejects.toBeDefined()
+
+      mockApi.events.get('shutdown')!()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('cleans up a second host that resolves to an already configured device id', async () => {
     const mockApi = api()
     const platformLog = log()

@@ -126,6 +126,47 @@ describe('CoapSocket.request', () => {
     expect(observerErrors).toEqual([])
     expect(socket.pendingCount).toBe(1)
   })
+
+  it('still receives replies for a hostname-configured device', async () => {
+    // A hand-edited config.json can carry a DNS name instead of a literal IP; dgram
+    // resolves it to send, but the reply's rinfo.address need not equal the literal
+    // hostname string, so the source check must fall back to port-only for it.
+    device = fakeDevice((request, reply) => {
+      reply({ code: CONTENT_2_05, messageId: request.messageId, token: request.token, payload: Buffer.from('pong') })
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('localhost', port)
+
+    const response = await socket.request({ method: 'GET', path: '/sys/dev/info' })
+    expect(response.payload.toString()).toBe('pong')
+  })
+
+  it('drops a datagram from a genuinely wrong source when host is a literal IP', async () => {
+    let capturedToken: Buffer | null = null
+    device = fakeDevice(request => {
+      capturedToken = request.token
+      // No reply from the real device; only the spoofed datagram below arrives.
+    })
+    const port = await device.listen()
+    socket = new CoapSocket('127.0.0.1', port)
+
+    const pending = socket.request({ method: 'GET', path: '/x', timeoutMs: 100 })
+    await vi.waitFor(() => expect(capturedToken).not.toBeNull())
+
+    const underlying = (socket as unknown as {
+      socket: { emit: (event: string, buffer: Buffer, rinfo: dgram.RemoteInfo) => void }
+    }).socket
+    // Same token as the real request, but from an address that isn't 127.0.0.1 — must
+    // still be dropped, proving the literal-IP source check still applies.
+    underlying.emit('message', encode({ code: CONTENT_2_05, messageId: 1, token: capturedToken! }), {
+      address: '10.0.0.9',
+      port,
+      family: 'IPv4',
+      size: 0,
+    })
+
+    await expect(pending).rejects.toThrow(/timeout/)
+  })
 })
 
 describe('CoapSocket.observe', () => {
