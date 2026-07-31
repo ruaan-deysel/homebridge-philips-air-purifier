@@ -3309,7 +3309,7 @@ Three rules come from hardware probing, not the HA registry:
 - [ ] Generates a stable accessory UUID from the device id, falling back to the host
 - [ ] Restores cached accessories via `configureAccessory` instead of duplicating them
 - [ ] Unregisters cached accessories no longer present in config
-- [ ] A device that fails to connect at startup logs an error and is skipped — it never crashes Homebridge or takes down the platform
+- [ ] A device that fails to connect at startup logs an error, stays registered, and retries via the coordinator backoff until it appears (CoAP NON has no retransmission, so one lost datagram must not drop the device until restart); the accessory attaches on first status, and a cached accessory reports SERVICE_COMMUNICATION_FAILURE rather than serving stale values. It never crashes Homebridge or takes down the platform. [CORRECTED 2026-07-31 by user ruling — original criterion said "and is skipped", which shipped a real availability bug]
 - [ ] With no `devices` configured the platform logs once and creates nothing
 - [ ] An unknown model logs once at info and uses a generation-detected generic profile
 - [ ] `shutdown` tears down every coordinator
@@ -3517,7 +3517,7 @@ git commit -m "Wire up the dynamic platform
 Accessory UUIDs seed from the device id rather than the host, so a DHCP
 lease change does not orphan the accessory and duplicate it.
 
-A device that fails to connect logs an error and is skipped; it never
+A device that fails to connect logs an error and is retried with backoff; it never
 takes down the platform or crashes Homebridge."
 ```
 
