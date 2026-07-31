@@ -9,10 +9,10 @@ Branch `worktree-philips-air-impl`. Reviewed range: `main..1017708`.
 | Reviewer | Status | Evidence |
 | --- | --- | --- |
 | CodeRabbit CLI 0.7.1 | **Complete** | `coderabbit review --base main`, exit 0, 47 files, 41 findings (1 critical, 15 major, 7 minor, 18 trivial). Note: 0.7.1 has no `--plain` flag; plain text is the default mode. |
-| Codex | **BLOCKED — not run** | Usage limit reached; retry available 2026-08-05 14:09. **Not substituted.** No other reviewer's output is presented as Codex's. |
+| Codex | **Dropped from the gate by user decision (2026-07-31)** | Usage limit reached (retry 2026-08-05 14:09). The user ruled CodeRabbit alone satisfies this task. Codex was **not run and not substituted** — no other reviewer's output is presented as Codex's, and the plan's original two-reviewer criterion is superseded by this ruling. |
 | Controller audit (opus) | Complete | Independent audit of Tasks 4/6/7/8/9, which had shipped with no review artifacts. 1 Critical + 4 Important, all verified against source before dispatch. |
 
-**Task 12 is therefore NOT closed.** Its acceptance criteria require both CodeRabbit and Codex. The Codex half remains open pending quota.
+**Task 12 is closed on CodeRabbit alone**, per the user's 2026-07-31 ruling. The plan's original criterion ("CodeRabbit and Codex both review") is superseded. Every CodeRabbit finding below carries a disposition, and the controller audit of the five unreviewed tasks is recorded alongside it.
 
 ## Protocol-invariant re-check
 
@@ -123,5 +123,5 @@ Run by the controller, not taken from an implementer's report:
 
 ## Outstanding
 
-1. **Codex adversarial review** — blocked on quota until 2026-08-05. Task 12 cannot close without it, or without an explicit decision to substitute a different reviewer (which must be recorded here).
-2. **Task 11, hardware verification** — blocked. `192.168.20.21` (Homebridge/unraid) and `192.168.20.151` (AC4220) are both unreachable: no ICMP, TCP 22/8581 refused, `curl` returns `000`, and the CoAP spike times out on `/sys/dev/info`. Gateway responds; ARP entries are present but stale.
+1. ~~Codex adversarial review~~ — **resolved by user ruling 2026-07-31: dropped from the gate.** CodeRabbit alone satisfies Task 12.
+2. **Task 11, hardware verification** — was blocked. `192.168.20.21` (Homebridge/unraid) and `192.168.20.151` (AC4220) are both unreachable: no ICMP, TCP 22/8581 refused, `curl` returns `000`, and the CoAP spike times out on `/sys/dev/info`. Gateway responds; ARP entries are present but stale.
