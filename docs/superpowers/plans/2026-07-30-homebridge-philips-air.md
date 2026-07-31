@@ -1,4 +1,4 @@
-# homebridge-philips-air-purifier Implementation Plan
+# homebridge-philips-airctrl Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers-extended-cc:subagent-driven-development (recommended) or superpowers-extended-cc:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -74,7 +74,7 @@
 
 ```json
 {
-  "name": "homebridge-philips-air-purifier",
+  "name": "homebridge-philips-airctrl",
   "displayName": "Philips Air Purifier",
   "version": "0.1.0",
   "description": "HomeKit support for Philips air purifiers over encrypted CoAP, with no Python dependency.",
@@ -201,7 +201,7 @@ export default [
 export const PLATFORM_NAME = 'PhilipsAirPurifier'
 
 /** Must match the `name` field in package.json. */
-export const PLUGIN_NAME = 'homebridge-philips-air-purifier'
+export const PLUGIN_NAME = 'homebridge-philips-airctrl'
 ```
 
 - [ ] **Step 5: Create `src/index.ts`**
@@ -229,7 +229,7 @@ import { PLATFORM_NAME, PLUGIN_NAME } from '../src/settings.js'
 describe('scaffold', () => {
   it('exposes the platform and plugin names', () => {
     expect(PLATFORM_NAME).toBe('PhilipsAirPurifier')
-    expect(PLUGIN_NAME).toBe('homebridge-philips-air-purifier')
+    expect(PLUGIN_NAME).toBe('homebridge-philips-airctrl')
   })
 })
 ```

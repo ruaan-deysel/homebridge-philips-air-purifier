@@ -2,4 +2,4 @@
 export const PLATFORM_NAME = 'PhilipsAirPurifier'
 
 /** Must match the `name` field in package.json. */
-export const PLUGIN_NAME = 'homebridge-philips-air-purifier'
+export const PLUGIN_NAME = 'homebridge-philips-airctrl'

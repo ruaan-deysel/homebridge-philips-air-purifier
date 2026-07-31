@@ -1,4 +1,4 @@
-# homebridge-philips-air-purifier — Design
+# homebridge-philips-airctrl — Design
 
 **Date:** 2026-07-30
 **Status:** Approved, ready for implementation planning
@@ -21,7 +21,7 @@ to TypeScript and hosted here, so the plugin has no runtime outside Node.
 ## Differentiation
 
 The closest existing plugin is
-[`homebridge-philips-air-purifier-complete`](https://github.com/MaddogWarner/homebridge-philips-air-purifier-complete)
+[`homebridge-philips-airctrl-complete`](https://github.com/MaddogWarner/homebridge-philips-airctrl-complete)
 (v3.3.1). It vendors the Python `aioairctrl` package inside the npm tarball —
 including `aioairctrl/coap/client.py` and an `aiocoap_monkeypatch.py` — and drives
 it from a single CommonJS `index.js` through a `philips_air_api.py` bridge.

@@ -1,7 +1,7 @@
 // Build the .tasks.json from the plan doc so descriptions cannot drift from it.
 import { readFileSync, writeFileSync } from 'node:fs'
 
-const PLAN = 'docs/superpowers/plans/2026-07-30-homebridge-philips-air-purifier.md'
+const PLAN = 'docs/superpowers/plans/2026-07-30-homebridge-philips-airctrl.md'
 const doc = readFileSync(PLAN, 'utf8')
 
 const GATE_BANNER = '> **USER-ORDERED GATE — NON-SKIPPABLE.** This task was requested by the user in the current conversation. It MUST NOT be closed by walking around it, by declaring it "verified inline", or by substituting a cheaper check. Close only after every item in `acceptanceCriteria` has been re-validated independently, with output captured.'

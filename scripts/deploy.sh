@@ -43,13 +43,13 @@ trap 'rm -f "$TARBALL"' EXIT
 echo "    $TARBALL"
 
 # Stable filename: npm records the install as
-#   "homebridge-philips-air-purifier": "file:homebridge-philips-air-purifier.tgz"
+#   "homebridge-philips-airctrl": "file:homebridge-philips-airctrl.tgz"
 # in /homebridge/package.json, so the tarball MUST stay on the host for that
 # reference to keep resolving. Deleting it leaves a dangling dependency and
 # every later `npm install` there fails with ENOENT; installing with --no-save
 # instead leaves the plugin unmanaged, so the next `npm install` prunes it and
 # its runtime deps. Keeping one stable, overwritten tarball avoids both.
-DEPLOYED=homebridge-philips-air-purifier.tgz
+DEPLOYED=homebridge-philips-airctrl.tgz
 
 echo "==> Ship to $UNRAID_HOST:$HOST_DIR/$DEPLOYED"
 sshpass -p "$UNRAID_PASS" scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
