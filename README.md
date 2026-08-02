@@ -1,5 +1,10 @@
 # Homebridge Philips Air Purifier
 
+[![npm](https://img.shields.io/npm/v/homebridge-philips-airctrl/latest?label=latest)](https://www.npmjs.com/package/homebridge-philips-airctrl)
+[![GitHub release](https://img.shields.io/github/release/ruaan-deysel/homebridge-philips-airctrl.svg)](https://github.com/ruaan-deysel/homebridge-philips-airctrl/releases)
+[![npm](https://img.shields.io/npm/dt/homebridge-philips-airctrl)](https://www.npmjs.com/package/homebridge-philips-airctrl)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
 HomeKit support for Philips air purifiers over their local, encrypted CoAP API.
 
 **No Python. No cloud. No third-party CoAP library.** The protocol — CoAP framing,
